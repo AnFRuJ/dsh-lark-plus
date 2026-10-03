@@ -13,9 +13,11 @@ import {
 	getDownloadState,
 	modelFiles,
 	modelReady,
+	persistAudio,
 	prepareAudio,
 	readWavFile,
 	resolveFfmpeg,
+	transcodeAudio,
 	resolveModelDir,
 	startModelDownload,
 	transcribeWavBuffer,
@@ -65,6 +67,20 @@ export interface VoiceService {
 		inboundDir: string | undefined,
 		uniqueSuffix?: string | number,
 	): Promise<TranscribeOutcome>;
+
+	/**
+	 * Persist raw audio bytes without transcribing. Used when transcription is
+	 * disabled: the clip must survive either way (the raw path is what the
+	 * agent is told about, and what the user can replay in Feishu).
+	 */
+	persistRawAudio(
+		buffer: Uint8Array,
+		baseName: string,
+		inboundDir: string | undefined,
+	): { localPath?: string; errors: string[] };
+
+	/** Transcribe an already-persisted audio file (no re-download). */
+	transcribeRaw(localPath: string, durationMs: number): Promise<TranscribeOutcome>;
 
 	/** Options change when config hot-reloads; call after each reload. */
 	configure(opts: VoiceOptions): void;
@@ -127,6 +143,22 @@ export function createVoiceService(
 				};
 			}
 			return { localPath: prepared.localPath, errors: [...errors, result.error ?? "转写失败"] };
+		},
+		persistRawAudio(buffer, baseName, inboundDir) {
+			return persistAudio(buffer, inboundDir, baseName);
+		},
+		async transcribeRaw(localPath, _durationMs) {
+			const errors: string[] = [];
+			const transcoded = transcodeAudio(localPath, current);
+			errors.push(...transcoded.errors);
+			if (!transcoded.wavPath) return { localPath, errors };
+			const result = await transcribeWavBuffer(readWavFile(transcoded.wavPath), current);
+			if (result.ok) return { text: result.text, localPath, errors };
+			if (result.modelMissing) {
+				this.startDownload();
+				return { localPath, errors: [...errors, "语音模型尚在下载，请稍后重发这条语音"], downloadStarted: true };
+			}
+			return { localPath, errors: [...errors, result.error ?? "转写失败"] };
 		},
 	};
 }

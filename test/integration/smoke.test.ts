@@ -64,12 +64,12 @@ test("smoke: apply() registers tools/commands and effect disposer runs cleanly",
 	assert.ok(toolNames.includes("lark_config_get"), "config tool registered");
 	const cmdNames = commands.map((c) => c.name);
 	assert.ok(
-		cmdNames.includes("lark"),
+		cmdNames.includes("lark-voice"),
 		"single /lark-voice dispatcher command registered",
 	);
 	assert.ok(
-		!cmdNames.includes("lark-status"),
-		"no flat lark-status (subcommand form /lark-voice status)",
+		!cmdNames.includes("lark-voice-status"),
+		"no flat lark-voice-status (subcommand form /lark-voice status)",
 	);
 
 	assert.equal(effects.length, 1, "one effect registered");

@@ -362,6 +362,40 @@ export interface DecodedAudio {
 	errors: string[];
 }
 
+/**
+ * Persist a downloaded audio buffer under inboundDir/media. Never throws:
+ * returns the local path, or an error string when it could not be written.
+ * Kept separate from transcription because the raw clip is retained even when
+ * transcription is disabled — replaying a message must not depend on STT.
+ */
+export function persistAudio(
+	buffer: Uint8Array,
+	inboundDir: string | undefined,
+	baseName: string,
+): { localPath?: string; errors: string[] } {
+	if (!inboundDir) return { errors: ["未配置 inboundDir，音频无法落盘"] };
+	try {
+		mkdirSync(join(inboundDir, "media"), { recursive: true });
+		const ext = detectContainer(buffer) === "ogg" ? "ogg" : "bin";
+		const localPath = join(inboundDir, "media", baseName + "." + ext);
+		writeFileSync(localPath, buffer);
+		return { localPath, errors: [] };
+	} catch (err) {
+		return { errors: ["落盘失败: " + (err instanceof Error ? err.message : String(err))] };
+	}
+}
+
+/** Transcode a persisted audio file to 16 kHz mono WAV for the recognizer. */
+export function transcodeAudio(
+	localPath: string,
+	opts: VoiceOptions = {},
+): { wavPath?: string; errors: string[] } {
+	const out = localPath + "." + TARGET_SAMPLE_RATE + ".wav";
+	const conv = transcodeToWav(localPath, out, resolveFfmpeg(opts.ffmpegPath), opts.ffmpegTimeoutMs);
+	if (conv.ok && conv.wavPath) return { wavPath: conv.wavPath, errors: [] };
+	return { errors: [conv.error ?? "转码失败"] };
+}
+
 /** Persist a downloaded audio buffer and transcode it; never throws. */
 export function prepareAudio(
 	buffer: Uint8Array,
@@ -370,26 +404,14 @@ export function prepareAudio(
 	durationMs: number,
 	opts: VoiceOptions = {},
 ): DecodedAudio {
-	const errors: string[] = [];
-	let localPath: string | undefined;
-	if (inboundDir) {
-		try {
-			mkdirSync(join(inboundDir, "media"), { recursive: true });
-			const ext = detectContainer(buffer) === "ogg" ? "ogg" : "bin";
-			localPath = join(inboundDir, "media", baseName + "." + ext);
-			writeFileSync(localPath, buffer);
-		} catch (err) {
-			errors.push("落盘失败: " + (err instanceof Error ? err.message : String(err)));
-		}
-	} else {
-		errors.push("未配置 inboundDir，音频无法落盘");
-	}
+	const persisted = persistAudio(buffer, inboundDir, baseName);
+	const localPath = persisted.localPath;
+	const errors = [...persisted.errors];
 	let wavPath: string | undefined;
 	if (localPath) {
-		const out = localPath + "." + TARGET_SAMPLE_RATE + ".wav";
-		const conv = transcodeToWav(localPath, out, resolveFfmpeg(opts.ffmpegPath), opts.ffmpegTimeoutMs);
-		if (conv.ok && conv.wavPath) wavPath = conv.wavPath;
-		else if (conv.error) errors.push(conv.error);
+		const transcoded = transcodeAudio(localPath, opts);
+		wavPath = transcoded.wavPath;
+		errors.push(...transcoded.errors);
 	}
 	return { localPath, wavPath, durationMs, errors };
 }

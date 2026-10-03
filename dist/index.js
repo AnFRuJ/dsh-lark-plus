@@ -2636,7 +2636,22 @@ function imgExt(m) {
 * `{tag:"img", image_key}` elements — every one is extracted and resolved.
 * Failures degrade to text-only (never drop the message).
 */
-async function resolveInboundAttachments(msg, ctx, inboundDir, voice) {
+/** Persist fallback used when no voice service is wired at all. */
+function persistAudioFallback(buffer, baseName, inboundDir) {
+	if (!inboundDir) return { errors: ["未配置 inboundDir，音频无法落盘"] };
+	try {
+		mkdirSync(join(inboundDir, "media"), { recursive: true });
+		const localPath = join(inboundDir, "media", `${baseName}.bin`);
+		writeFileSync(localPath, buffer);
+		return {
+			localPath,
+			errors: []
+		};
+	} catch (err) {
+		return { errors: ["落盘失败: " + (err instanceof Error ? err.message : String(err))] };
+	}
+}
+async function resolveInboundAttachments(msg, ctx, inboundDir, voice, transcribe = true) {
 	const out = [];
 	if (!msg.messageId) return out;
 	try {
@@ -2680,10 +2695,13 @@ async function resolveInboundAttachments(msg, ctx, inboundDir, voice) {
 				});
 				if (buf && buf.length > 0) {
 					const seconds = durationMs > 0 ? (durationMs / 1e3).toFixed(1) : "?";
+					const stem = `feishu-${sanitizeAttachmentName(msg.messageId)}-${msg.timestamp}-${sanitizeAttachmentName(key.slice(-6))}`;
 					let localPath;
-					if (voice) {
-						const outcome = await voice.transcribe(buf, `feishu-${sanitizeAttachmentName(msg.messageId)}`, durationMs, inboundDir, msg.timestamp);
-						localPath = outcome.localPath;
+					const persisted = voice ? voice.persistRawAudio(buf, stem, inboundDir) : persistAudioFallback(buf, stem, inboundDir);
+					localPath = persisted.localPath;
+					for (const e of persisted.errors) ctx.logger.warn(`voice: ${e}`);
+					if (voice && transcribe && localPath) {
+						const outcome = await voice.transcribeRaw(localPath, durationMs);
 						for (const e of outcome.errors) ctx.logger.warn(`voice: ${e}`);
 						if (outcome.text) msg.text = outcome.text;
 					}
@@ -2816,7 +2834,7 @@ function createMessageHandler(deps) {
 				lastMessageId: msg.messageId,
 				updatedAt: Date.now()
 			});
-			const attachments = await resolveInboundAttachments(msg, deps.ctx, deps.inboundDir, deps.voice);
+			const attachments = await resolveInboundAttachments(msg, deps.ctx, deps.inboundDir, deps.voice, deps.transcribeAudio !== false);
 			if ((msg.msgType === "text" || (msg.text ?? "").trim() !== "") && !compensated && deps.wal) try {
 				deps.wal.accept({
 					messageId: msg.messageId,
@@ -4811,25 +4829,46 @@ async function downloadModel(dir, opts = {}) {
 function startModelDownload(dir, opts = {}) {
 	downloadModel(dir, opts);
 }
-/** Persist a downloaded audio buffer and transcode it; never throws. */
-function prepareAudio(buffer, inboundDir, baseName, durationMs, opts = {}) {
-	const errors = [];
-	let localPath;
-	if (inboundDir) try {
+/**
+* Persist a downloaded audio buffer under inboundDir/media. Never throws:
+* returns the local path, or an error string when it could not be written.
+* Kept separate from transcription because the raw clip is retained even when
+* transcription is disabled — replaying a message must not depend on STT.
+*/
+function persistAudio(buffer, inboundDir, baseName) {
+	if (!inboundDir) return { errors: ["未配置 inboundDir，音频无法落盘"] };
+	try {
 		mkdirSync(join(inboundDir, "media"), { recursive: true });
 		const ext = detectContainer(buffer) === "ogg" ? "ogg" : "bin";
-		localPath = join(inboundDir, "media", baseName + "." + ext);
+		const localPath = join(inboundDir, "media", baseName + "." + ext);
 		writeFileSync(localPath, buffer);
+		return {
+			localPath,
+			errors: []
+		};
 	} catch (err) {
-		errors.push("落盘失败: " + (err instanceof Error ? err.message : String(err)));
+		return { errors: ["落盘失败: " + (err instanceof Error ? err.message : String(err))] };
 	}
-	else errors.push("未配置 inboundDir，音频无法落盘");
+}
+/** Transcode a persisted audio file to 16 kHz mono WAV for the recognizer. */
+function transcodeAudio(localPath, opts = {}) {
+	const conv = transcodeToWav(localPath, localPath + ".16000.wav", resolveFfmpeg(opts.ffmpegPath), opts.ffmpegTimeoutMs);
+	if (conv.ok && conv.wavPath) return {
+		wavPath: conv.wavPath,
+		errors: []
+	};
+	return { errors: [conv.error ?? "转码失败"] };
+}
+/** Persist a downloaded audio buffer and transcode it; never throws. */
+function prepareAudio(buffer, inboundDir, baseName, durationMs, opts = {}) {
+	const persisted = persistAudio(buffer, inboundDir, baseName);
+	const localPath = persisted.localPath;
+	const errors = [...persisted.errors];
 	let wavPath;
 	if (localPath) {
-		const out = localPath + ".16000.wav";
-		const conv = transcodeToWav(localPath, out, resolveFfmpeg(opts.ffmpegPath), opts.ffmpegTimeoutMs);
-		if (conv.ok && conv.wavPath) wavPath = conv.wavPath;
-		else if (conv.error) errors.push(conv.error);
+		const transcoded = transcodeAudio(localPath, opts);
+		wavPath = transcoded.wavPath;
+		errors.push(...transcoded.errors);
 	}
 	return {
 		localPath,
@@ -4908,6 +4947,36 @@ function createVoiceService(logger, opts = {}) {
 			}
 			return {
 				localPath: prepared.localPath,
+				errors: [...errors, result.error ?? "转写失败"]
+			};
+		},
+		persistRawAudio(buffer, baseName, inboundDir) {
+			return persistAudio(buffer, inboundDir, baseName);
+		},
+		async transcribeRaw(localPath, _durationMs) {
+			const errors = [];
+			const transcoded = transcodeAudio(localPath, current);
+			errors.push(...transcoded.errors);
+			if (!transcoded.wavPath) return {
+				localPath,
+				errors
+			};
+			const result = await transcribeWavBuffer(readWavFile(transcoded.wavPath), current);
+			if (result.ok) return {
+				text: result.text,
+				localPath,
+				errors
+			};
+			if (result.modelMissing) {
+				this.startDownload();
+				return {
+					localPath,
+					errors: [...errors, "语音模型尚在下载，请稍后重发这条语音"],
+					downloadStarted: true
+				};
+			}
+			return {
+				localPath,
 				errors: [...errors, result.error ?? "转写失败"]
 			};
 		}
@@ -6097,7 +6166,8 @@ function apply(ctx, rawConfig) {
 		allowlist: () => getCfg().allowlist,
 		wal: inboundWal,
 		inboundDir: getCfg().attachments.dir.trim() || join(tmpdir(), "dsh-lark-voice", "inbound"),
-		voice: voiceEnabled ? voice : void 0
+		voice,
+		transcribeAudio: voiceEnabled
 	});
 	const turnDelivered = /* @__PURE__ */ new Set();
 	const conversations = createConversationManager({

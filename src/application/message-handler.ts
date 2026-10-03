@@ -36,9 +36,13 @@ export interface MessageHandlerDeps {
 	 * ref (`imageRef`) is still produced for vision-capable models.
 	 */
 	inboundDir?: string;
-	/** Local offline voice transcription (SenseVoice). Optional: when absent,
-	 *  inbound audio messages still keep their file but yield no text. */
+	/** Local audio persistence + optional offline transcription. Always present
+	 *  in a real deployment: it persists inbound voice clips even when
+	 *  transcription is switched off. */
 	voice?: VoiceService;
+	/** Whether to transcribe inbound voice (voice.enabled). Persisting the raw
+	 *  clip happens regardless — replay must not depend on STT. */
+	transcribeAudio?: boolean;
 }
 
 export interface MessageHandler {
@@ -103,11 +107,29 @@ function imgExt(m: "image/png" | "image/jpeg" | "image/webp" | "image/gif"): str
  * `{tag:"img", image_key}` elements — every one is extracted and resolved.
  * Failures degrade to text-only (never drop the message).
  */
+/** Persist fallback used when no voice service is wired at all. */
+function persistAudioFallback(
+	buffer: Uint8Array,
+	baseName: string,
+	inboundDir?: string,
+): { localPath?: string; errors: string[] } {
+	if (!inboundDir) return { errors: ["未配置 inboundDir，音频无法落盘"] };
+	try {
+		mkdirSync(join(inboundDir, "media"), { recursive: true });
+		const localPath = join(inboundDir, "media", `${baseName}.bin`);
+		writeFileSync(localPath, buffer);
+		return { localPath, errors: [] };
+	} catch (err) {
+		return { errors: ["落盘失败: " + (err instanceof Error ? err.message : String(err))] };
+	}
+}
+
 export async function resolveInboundAttachments(
 	msg: FeishuInboundMessage,
 	ctx: BridgeContextRead,
 	inboundDir?: string,
 	voice?: VoiceService,
+	transcribe = true,
 ): Promise<AttachmentInput[]> {
 	const out: AttachmentInput[] = [];
 	if (!msg.messageId) return out;
@@ -190,16 +212,20 @@ export async function resolveInboundAttachments(
 				});
 				if (buf && buf.length > 0) {
 					const seconds = durationMs > 0 ? (durationMs / 1000).toFixed(1) : "?";
+					// The raw clip is ALWAYS persisted first — independent of whether
+					// transcription is available/enabled. Replay must never depend on STT.
+					// The file_key tail makes the name unique even when two voice messages
+					// share a millisecond — overwriting a clip the agent was already told
+					// about is the one failure mode worse than a longer filename.
+					const stem = `feishu-${sanitizeAttachmentName(msg.messageId)}-${msg.timestamp}-${sanitizeAttachmentName(key.slice(-6))}`;
 					let localPath: string | undefined;
-					if (voice) {
-						const outcome = await voice.transcribe(
-							buf,
-							`feishu-${sanitizeAttachmentName(msg.messageId)}`,
-							durationMs,
-							inboundDir,
-							msg.timestamp,
-						);
-						localPath = outcome.localPath;
+					const persisted = voice
+						? voice.persistRawAudio(buf, stem, inboundDir)
+						: persistAudioFallback(buf, stem, inboundDir);
+					localPath = persisted.localPath;
+					for (const e of persisted.errors) ctx.logger.warn(`voice: ${e}`);
+					if (voice && transcribe && localPath) {
+						const outcome = await voice.transcribeRaw(localPath, durationMs);
 						for (const e of outcome.errors) ctx.logger.warn(`voice: ${e}`);
 						if (outcome.text) msg.text = outcome.text;
 					}
@@ -400,6 +426,7 @@ export function createMessageHandler(deps: MessageHandlerDeps): MessageHandler {
 				deps.ctx,
 				deps.inboundDir,
 				deps.voice,
+				deps.transcribeAudio !== false,
 			);
 			// Durably record the agent-bound request BEFORE enqueuing it, so a
 			// crash/plugin-reload mid-turn can re-trigger it on boot. Only text

@@ -2004,7 +2004,11 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		inboundDir:
 			getCfg().attachments.dir.trim() ||
 			join(tmpdir(), "dsh-lark-voice", "inbound"),
-		voice: voiceEnabled ? voice : undefined,
+		// The service is always wired (it persists the raw clip); the flag only
+		// controls whether we also transcribe. voice.enabled=false therefore keeps
+		// every voice message as an audio file with no recognized text.
+		voice,
+		transcribeAudio: voiceEnabled,
 	});
 
 	// ---- conversations / turn supervisor --------------------------------------
