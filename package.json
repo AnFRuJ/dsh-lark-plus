@@ -124,7 +124,7 @@
     "check": "tsc --noEmit",
     "test": "node --experimental-strip-types --test \"test/**/*.test.ts\"",
     "prepack": "npm run build",
-    "test:voice": "node --experimental-strip-types --test test/voice-smoke.test.ts test/voice-attachments.test.ts test/voice-handler-e2e.test.ts",
+    "test:voice": "node --experimental-strip-types --test test/voice-smoke.test.ts test/voice-attachments.test.ts test/voice-handler-e2e.test.ts test/voice-routing.test.ts",
     "verify": "npm run check && npm run build && npm run test:voice"
   },
   "engines": {
