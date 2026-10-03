@@ -36,7 +36,7 @@ import {
 	createBridgeContext,
 	type FeishuSender,
 } from "./application/bridge-context.ts";
-import { createMessageHandler } from "./application/message-handler.ts";
+import { createMessageHandler, resolveInboundAttachments } from "./application/message-handler.ts";
 import { startMediaSweeper } from "./application/media-retention.ts";
 import {
 	createCommandRouter,
@@ -111,6 +111,11 @@ import { createVoiceService } from "./voice/service.ts";
 import { transcribeWavBuffer } from "./voice/transcribe.ts";
 
 export const name = "dsh-lark-voice";
+
+// Test surface: the inbound-audio branch is the behaviour this fork adds, and
+// it has to be reachable from the BUILT artefact (not just the sources) so a
+// verification run exercises exactly what gets installed.
+export { resolveInboundAttachments };
 export const inject = [
 	"tools",
 	"commands",

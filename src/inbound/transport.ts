@@ -224,7 +224,9 @@ export function normalizeInbound(
 				? "[图片]"
 				: msgType === "file"
 					? "[文件]"
-					: pickText(msg.content ?? raw.content, msgType),
+					: msgType === "audio"
+						? "[语音]"
+						: pickText(msg.content ?? raw.content, msgType),
 		rootId: msg.root_id ?? raw.root_id,
 		parentId: msg.parent_id ?? raw.parent_id,
 		threadId: msg.thread_id ?? raw.thread_id,

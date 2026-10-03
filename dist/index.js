@@ -1990,7 +1990,7 @@ function normalizeInbound(raw, opts = {}) {
 		senderOpenId,
 		msgType,
 		content: msg.content ?? raw.content ?? "",
-		text: msgType === "image" ? "[图片]" : msgType === "file" ? "[文件]" : pickText(msg.content ?? raw.content, msgType),
+		text: msgType === "image" ? "[图片]" : msgType === "file" ? "[文件]" : msgType === "audio" ? "[语音]" : pickText(msg.content ?? raw.content, msgType),
 		rootId: msg.root_id ?? raw.root_id,
 		parentId: msg.parent_id ?? raw.parent_id,
 		threadId: msg.thread_id ?? raw.thread_id,
@@ -6743,4 +6743,4 @@ function apply(ctx, rawConfig) {
 	});
 }
 //#endregion
-export { apply, inject, name, stateDir };
+export { apply, inject, name, resolveInboundAttachments, stateDir };

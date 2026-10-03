@@ -155,3 +155,27 @@ test("normalizeInbound: post v1 (content [[img],[text]]) extracts the caption te
   assert.equal(msg?.text, "这个图片描述下");
   assert.notEqual(msg?.text, msg?.content, "raw JSON must never become the prompt");
 });
+
+// --- media placeholders ----------------------------------------------------
+// Media messages carry a resource JSON instead of text. An EMPTY text makes
+// the command router answer 'skipped' and the message never reaches the agent
+// — that is exactly how inbound voice messages were being lost before this
+// fork. Image/file already had placeholders; audio now has one too (the voice
+// lane then replaces it with the recognized text).
+test("normalizeInbound: audio gets the [语音] placeholder", () => {
+  const msg = normalizeInbound({
+    message: {
+      message_id: "om_a",
+      chat_id: "oc_a",
+      chat_type: "p2p",
+      message_type: "audio",
+      content: JSON.stringify({ file_key: "file_v3_x", duration: 3000 }),
+    },
+    sender: { sender_id: { open_id: "ou_u" } },
+  });
+  assert.ok(msg);
+  assert.equal(msg?.msgType, "audio");
+  assert.equal(msg?.text, "[语音]");
+  assert.notEqual(msg?.text, msg?.content, "raw JSON must never become the prompt");
+});
+
