@@ -1,0 +1,33 @@
+# dsh-lark-voice bundle patch — inserts the bridge plugin entry into the
+# composition. Users install via `dsh plugin add dsh-lark-voice` (npm) or by
+# pointing the DSH plugin manager at this repository.
+- insert:
+    - id: lark-voice
+      name: 'dsh-lark-voice'
+      config:
+        enabled: !!js "process.env.DSH_LARK_VOICE_ENABLED ?? 'true'"
+        # Feishu app credentials. Prefer the one-click `/lark-voice setup` flow
+        # (QR registerApp); manual entry writes to ctx.credentials.
+        appId: !!js "process.env.DSH_LARK_APP_ID ?? ''"
+        # groupPolicy: open | mention | keywords | reply
+        groupPolicy: !!js "process.env.DSH_LARK_VOICE_GROUP_POLICY ?? 'mention'"
+        # denyList: exact command prefixes denied outright (no prompt, no card).
+        denyList: []
+        # ---- local offline voice transcription (SenseVoice + sherpa-onnx) ----
+        # Every key is optional. Audio never leaves this machine; the only
+        # network use is the one-time model download. Remove the whole block
+        # to keep the audio files without transcribing them.
+        voice:
+          enabled: true
+          # Model directory holding model.int8.onnx + tokens.txt.
+          # Empty = $DSH_HOME/voice/sensevoice (shared with dsh-voice-local,
+          # so an already-downloaded model is reused, never fetched twice).
+          modelDir: ''
+          # ffmpeg used for OGG/Opus → 16 kHz mono WAV. Empty = auto-detect
+          # (DSH_VOICE_FFMPEG env → PATH → common install dirs).
+          ffmpegPath: ''
+          # Model source overrides. mirrors is comma-separated and is tried
+          # before the built-in list (hf-mirror / ghfast / gh-proxy).
+          modelUrl: ''
+          mirrors: ''
+          ffmpegTimeoutMs: 60000

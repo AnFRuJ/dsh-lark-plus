@@ -1,0 +1,161 @@
+// CommandRouter: the three-tier command dispatch (ADR-7, spec §4.2):
+//   1. bridge-specific commands (/status /support /lark-config …) → bridge
+//   2. DSH-registered commands → native handler({agent, rawInput})
+//   3. everything else (plugin commands, /skill:x, unknown /xxx, plain text)
+//      → injected verbatim into the agent
+// No blocked commands, no admin gates (user decision: 无审批, 全放开).
+
+import type { FeishuInboundMessage } from "../common/types.ts";
+import type { BridgeContextRead } from "./bridge-context.ts";
+
+export interface DshCommandRegistry {
+	/** Look up a registered command handler by name for the agent (no leading slash). */
+	has(name: string, agentId?: string): boolean;
+	run(
+		name: string,
+		rawInput: string,
+		agentId: string,
+	): Promise<{ kind: string; text?: string }>;
+}
+
+export interface CommandRouterDeps {
+	ctx: BridgeContextRead;
+	commands: DshCommandRegistry;
+	/** Handle a bridge-specific command; returns handled=true when consumed. */
+	bridgeHandler(
+		name: string,
+		rawInput: string,
+		msg: FeishuInboundMessage,
+	): Promise<boolean>;
+}
+
+export interface CommandRouter {
+	/** Route an inbound message (or its text) through the tiers. */
+	route(
+		msg: FeishuInboundMessage,
+	): Promise<"bridge" | "dsh" | "agent" | "skipped">;
+	/** True when the message starts with a slash. */
+	isCommand(text: string): boolean;
+}
+
+const BRIDGE_COMMANDS = new Set([
+	"status",
+	"workspace",
+	"stop",
+	"support",
+	"doctor",
+	"sessions",
+	"lark-config",
+	"help",
+	"feishu-config",
+	"model",
+	"mode",
+	"permission",
+	"new",
+	// Feishu-side history picker — Tier 1 wins over DSH's own /resume so the
+	// workspace-session card renders instead of a bare text reply.
+	"resume",
+	// Feishu-side goal controller — Tier 1 renders interactive goal deck / templates.
+	"goal",
+]);
+
+
+export function stripLeadingMentions(text: string): string {
+	let cur = text.trim();
+	while (true) {
+		const next = cur.replace(/^(?:<at[^>]*>.*?<\/at>|@\S+)\s*/i, "").trim();
+		if (next === cur) break;
+		cur = next;
+	}
+	return cur;
+}
+
+export function createCommandRouter(deps: CommandRouterDeps): CommandRouter {
+	return {
+		isCommand(text) {
+			const cleaned = stripLeadingMentions(text);
+			return /^\//.test(cleaned);
+		},
+		async route(msg) {
+			const rawText = (msg.text ?? msg.content ?? "").trim();
+			if (rawText === "") return "skipped";
+
+			const text = stripLeadingMentions(rawText);
+			if (text === "") return "skipped";
+			if (!this.isCommand(rawText)) return "agent"; // plain message → agent
+
+			// Tier 1: bridge-specific
+			const tokens = text.split(/\s+/);
+			const head = tokens[0] ?? "";
+			const cmdName = head.replace(/^\/+/, "").toLowerCase();
+			const rawInput = tokens.slice(1).join(" ");
+			if (BRIDGE_COMMANDS.has(cmdName) || cmdName === "lark") {
+				const handled = await deps.bridgeHandler(cmdName, rawInput, msg);
+				if (handled) {
+					// Command replies get the DONE receipt too (pi design:
+					// 任务完成 → 对触发消息打 DONE)，so /help /status confirm
+					// completion instead of silently ending.
+					const cfg = deps.ctx.cfg();
+					if (cfg.reactions.enabled) {
+						void deps.ctx.sender
+							?.addReaction(msg.messageId, cfg.reactions.done || "DONE")
+							.catch(() => undefined);
+					}
+				}
+				return handled ? "bridge" : "agent";
+			}
+
+			// Tier 2: DSH-registered commands (native handler, no model round-trip).
+			// Commands resolve per agent — lazy-create the session agent when the
+			// first message of a conversation is a command (otherwise every
+			// DSH command fails on a fresh chat).
+			const key2 = deps.ctx.conversationKeyFor(msg);
+			let agent = deps.ctx.backend?.get(key2);
+			if (!agent) {
+				try {
+					agent = await deps.ctx.backend?.ensureAgent?.(key2);
+				} catch {
+					// fall through to agent
+				}
+			}
+			const agentId = agent?.agentId ?? "";
+			if (agentId && deps.commands.has(cmdName, agentId)) {
+				try {
+					const result = await deps.commands.run(cmdName, rawInput, agentId);
+					const key = deps.ctx.conversationKeyFor(msg);
+					if (result.kind === "success" && result.text) {
+						await deps.ctx.outbox?.enqueue({
+							dedupeKey: `${key}:cmd:${cmdName}:${msg.messageId}`,
+							laneKey: key,
+							route: {
+								sessionKey: key,
+								chatId: msg.chatId,
+								chatType: msg.chatType,
+							},
+							kind: "command-reply",
+							payload: { kind: "text", text: result.text },
+						});
+					} else if (result.kind === "error" && result.text) {
+						await deps.ctx.outbox?.enqueue({
+							dedupeKey: `${key}:cmd:${cmdName}:${msg.messageId}`,
+							laneKey: key,
+							route: {
+								sessionKey: key,
+								chatId: msg.chatId,
+								chatType: msg.chatType,
+							},
+							kind: "command-reply",
+							payload: { kind: "text", text: `⚠️ ${result.text}` },
+						});
+					}
+					return "dsh";
+				} catch {
+					return "agent"; // handler failed — fall through to the agent
+				}
+			}
+
+			// Tier 3: everything else passes verbatim to the agent
+			return "agent";
+		},
+	};
+}

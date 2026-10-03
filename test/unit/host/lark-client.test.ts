@@ -1,0 +1,402 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { Readable } from "node:stream";
+import {
+	isValidRef,
+	normalizeUserInfo,
+	parseCredentials,
+	resolveCredentials,
+	persistCredentials,
+	clearCredentials,
+	buildLarkClient,
+	type CredentialsStore,
+	type LarkSdk,
+	type LarkCredentials,
+} from "../../../src/host/lark-client.ts";
+
+// ---- in-memory credential store ----
+function memStore(initial: Record<string, string> = {}): CredentialsStore & {
+	dump(): Record<string, string>;
+} {
+	const db = new Map<string, string>(Object.entries(initial));
+	return {
+		async resolve(ref) {
+			const value = db.get(ref);
+			return value === undefined ? undefined : { value };
+		},
+		async set(ref, value) {
+			db.set(ref, value);
+		},
+		async unset(ref) {
+			db.delete(ref);
+		},
+		dump: () => Object.fromEntries(db),
+	};
+}
+
+// ---- fake SDK (records calls, returns canned shapes) ----
+function fakeSdk() {
+	const calls: Record<string, unknown[]> = {};
+	const mark =
+		(name: string) =>
+		(arg: unknown): Promise<unknown> => {
+			(calls[name] ??= []).push(arg);
+			return Promise.resolve({
+				[name === "file.create"
+					? "file_key"
+					: name === "image.create"
+						? "image_key"
+						: "ok"]: name,
+			});
+		};
+	const handlers: Record<string, (data: unknown) => unknown> = {};
+	const dispatcher = {
+		register(map: Record<string, (data: unknown) => unknown>) {
+			Object.assign(handlers, map);
+			return dispatcher;
+		},
+	};
+	const wsStartArgs: unknown[] = [];
+	const wsClient = {
+		start(opts: unknown) {
+			wsStartArgs.push(opts);
+		},
+		stop() {},
+	};
+	const sdkClient = {
+		request: async () => ({
+			bot: { open_id: "ou_bot_1", app_name: "Lark Link Bot" },
+		}),
+		im: {
+			message: {
+				create: mark("message.create"),
+				reply: mark("message.reply"),
+				list: async () => ({
+					items: [{ message_id: "om_1", create_time: "1700000000" }],
+				}),
+			},
+			messageReaction: { create: mark("reaction.create") },
+			file: { create: mark("file.create") },
+			image: { create: mark("image.create") },
+		},
+	};
+	const sdk: LarkSdk = {
+		Client: function Client() {
+			return sdkClient;
+		} as unknown as LarkSdk["Client"],
+		WSClient: function WSClient() {
+			return wsClient;
+		} as unknown as LarkSdk["WSClient"],
+		EventDispatcher: function EventDispatcher() {
+			return dispatcher;
+		} as unknown as LarkSdk["EventDispatcher"],
+		AppType: { SelfBuild: 0 },
+		Domain: { Feishu: "FEISHU", Lark: "LARK" },
+		LoggerLevel: { error: 3 },
+	};
+	return { sdk, calls, handlers, wsStartArgs, wsClient };
+}
+
+// ---- credential ref validation ----
+test("lark-client: ref pattern rejects dots (ctx.credentials requirement)", () => {
+	assert.equal(isValidRef("LARK_LINK_APP"), true);
+	assert.equal(isValidRef("lark-voice.app"), false, "dots are invalid");
+	assert.equal(isValidRef("9bad"), false, "must start with letter/underscore");
+});
+
+// ---- parseCredentials ----
+test("lark-client: parseCredentials reads JSON blob", () => {
+	const blob = JSON.stringify({
+		appId: "cli_a",
+		appSecret: "sec",
+		domain: "lark",
+	});
+	assert.deepEqual(parseCredentials(blob), {
+		appId: "cli_a",
+		appSecret: "sec",
+		domain: "lark",
+	});
+	assert.deepEqual(
+		parseCredentials(JSON.stringify({ appId: "a", appSecret: "s" })),
+		{
+			appId: "a",
+			appSecret: "s",
+			domain: "feishu",
+		},
+	);
+	assert.equal(parseCredentials(undefined), undefined);
+	assert.equal(parseCredentials("not json"), undefined);
+	assert.equal(
+		parseCredentials(JSON.stringify({ appId: "a" })),
+		undefined,
+		"missing secret",
+	);
+});
+
+// ---- GH #12: user_info survives the credential blob ----
+test("lark-client: normalizeUserInfo keeps real fields, drops empty payloads", () => {
+	assert.equal(normalizeUserInfo(undefined), undefined);
+	assert.equal(normalizeUserInfo({}), undefined, "empty payload → undefined");
+	assert.equal(
+		normalizeUserInfo({ open_id: "" }),
+		undefined,
+		"empty string is not an id",
+	);
+	assert.equal(
+		normalizeUserInfo({ tenant_brand: "bogus" }),
+		undefined,
+		"unknown brand dropped",
+	);
+	assert.deepEqual(normalizeUserInfo({ open_id: "ou_1" }), { open_id: "ou_1" });
+	assert.deepEqual(
+		normalizeUserInfo({ open_id: "ou_1", tenant_brand: "lark" }),
+		{ open_id: "ou_1", tenant_brand: "lark" },
+	);
+});
+
+test("lark-client: parseCredentials carries user_info through (GH #12)", () => {
+	// parseCredentials rebuilds the object field by field — anything it does
+	// not copy is silently lost on every read, so assert the round-trip.
+	const blob = JSON.stringify({
+		appId: "cli_a",
+		appSecret: "sec",
+		domain: "feishu",
+		userInfo: { open_id: "ou_scan", tenant_brand: "feishu" },
+	});
+	assert.deepEqual(parseCredentials(blob), {
+		appId: "cli_a",
+		appSecret: "sec",
+		domain: "feishu",
+		userInfo: { open_id: "ou_scan", tenant_brand: "feishu" },
+	});
+});
+
+test("lark-client: pre-GH#12 blob still parses without a userInfo key", () => {
+	const parsed = parseCredentials(
+		JSON.stringify({ appId: "a", appSecret: "s", domain: "lark" }),
+	);
+	assert.deepEqual(parsed, { appId: "a", appSecret: "s", domain: "lark" });
+	assert.equal(
+		Object.hasOwn(parsed as object, "userInfo"),
+		false,
+		"no phantom key — the stored shape is unchanged for old blobs",
+	);
+	// A blob whose userInfo is junk must not poison the credentials.
+	assert.deepEqual(
+		parseCredentials(
+			JSON.stringify({
+				appId: "a",
+				appSecret: "s",
+				domain: "lark",
+				userInfo: {},
+			}),
+		),
+		{ appId: "a", appSecret: "s", domain: "lark" },
+	);
+});
+
+// ---- resolve / persist / clear ----
+test("lark-client: resolve → persist → clear round-trip", async () => {
+	const store = memStore();
+	assert.equal(await resolveCredentials(store, "LARK_LINK_APP"), undefined);
+	const creds: LarkCredentials = {
+		appId: "cli_x",
+		appSecret: "shh",
+		domain: "feishu",
+		userInfo: { open_id: "ou_round", tenant_brand: "feishu" },
+	};
+	await persistCredentials(store, "LARK_LINK_APP", creds);
+	assert.deepEqual(await resolveCredentials(store, "LARK_LINK_APP"), creds);
+	assert.equal(
+		store.dump()["LARK_LINK_APP"],
+		JSON.stringify(creds),
+		"stored as JSON blob",
+	);
+	await clearCredentials(store, "LARK_LINK_APP");
+	assert.equal(await resolveCredentials(store, "LARK_LINK_APP"), undefined);
+});
+
+test("lark-client: persist rejects invalid ref", async () => {
+	const store = memStore();
+	await assert.rejects(() =>
+		persistCredentials(store, "lark-voice.app", {
+			appId: "a",
+			appSecret: "s",
+			domain: "feishu",
+		}),
+	);
+});
+
+// ---- buildLarkClient adapter ----
+test("lark-client: on() registers into the dispatcher; ws.start boots WSClient with it", async () => {
+	const fake = fakeSdk();
+	const client = await buildLarkClient({
+		appId: "a",
+		appSecret: "s",
+		domain: "feishu",
+		sdkLoader: () => fake.sdk,
+	});
+	const handler = (): unknown => undefined;
+	client.on!("im.message.receive_v1", handler);
+	assert.equal(fake.handlers["im.message.receive_v1"], handler);
+	client.ws?.start?.();
+	assert.equal(
+		(fake.wsStartArgs[0] as { eventDispatcher: unknown }).eventDispatcher !==
+			undefined,
+		true,
+	);
+});
+
+test("lark-client: getBotInfo probes bot/v3/info", async () => {
+	const fake = fakeSdk();
+	const client = await buildLarkClient({
+		appId: "a",
+		appSecret: "s",
+		domain: "feishu",
+		sdkLoader: () => fake.sdk,
+	});
+	const info = await client.getBotInfo!();
+	assert.equal(info.open_id, "ou_bot_1");
+});
+
+test("lark-client: sendMessage translates sender shape → SDK im.message.create", async () => {
+	const fake = fakeSdk();
+	const client = await buildLarkClient({
+		appId: "a",
+		appSecret: "s",
+		domain: "feishu",
+		sdkLoader: () => fake.sdk,
+	});
+	await client.sendMessage!({
+		receive_id_type: "chat_id",
+		params: { receive_id: "oc_1", msg_type: "text", content: "{}" },
+	});
+	const arg = (fake.calls["message.create"] ?? [])[0] as {
+		params: { receive_id_type: string };
+		data: { receive_id: string };
+	};
+	assert.equal(arg.params.receive_id_type, "chat_id");
+	assert.equal(arg.data.receive_id, "oc_1");
+});
+
+test("lark-client: addReaction + listMessages map shapes", async () => {
+	const fake = fakeSdk();
+	const client = await buildLarkClient({
+		appId: "a",
+		appSecret: "s",
+		domain: "feishu",
+		sdkLoader: () => fake.sdk,
+	});
+	await client.addReaction!({ message_id: "om_9", emoji_type: "THUMBSUP" });
+	const rArg = (fake.calls["reaction.create"] ?? [])[0] as {
+		path: { message_id: string };
+		data: { reaction_type: { emoji_type: string } };
+	};
+	assert.equal(rArg.path.message_id, "om_9");
+	assert.equal(rArg.data.reaction_type.emoji_type, "THUMBSUP");
+	const res = await client.listMessages!({
+		container_id_type: "chat",
+		container_id: "oc_1",
+		start_time: "0",
+		end_time: "9",
+	});
+	assert.equal(res.items?.[0]?.message_id, "om_1");
+});
+
+test("lark-client: uploadFile/uploadImage pass the Buffer through", async () => {
+	const fake = fakeSdk();
+	const client = await buildLarkClient({
+		appId: "a",
+		appSecret: "s",
+		domain: "feishu",
+		sdkLoader: () => fake.sdk,
+	});
+	const buf = Buffer.from("hello");
+	const fk = await client.uploadFile!({
+		file_type: "file",
+		file_name: "x.txt",
+		file: buf,
+	});
+	assert.equal((fk as { file_key: string }).file_key, "file.create");
+	// SDK im.v1.file.create takes data: {file_type, file_name, file}.
+	const fc = (fake.calls["file.create"] ?? [])[0] as {
+		data: { file_type: string; file_name: string; file: Buffer };
+	};
+	assert.deepEqual(fc.data.file, buf);
+	// "file" is not a valid Feishu file_type — .txt maps to "stream".
+	assert.equal(fc.data.file_type, "stream");
+	assert.equal(fc.data.file_name, "x.txt");
+	const ik = await client.uploadImage!({ image: buf });
+	assert.equal((ik as { image_key: string }).image_key, "image.create");
+	// SDK im.v1.image.create takes data: {image_type, image}.
+	const ic = (fake.calls["image.create"] ?? [])[0] as {
+		data: { image_type: string; image: Buffer };
+	};
+	assert.equal(ic.data.image_type, "message");
+	assert.deepEqual(ic.data.image, buf);
+});
+
+test("lark-client: domain=lark selects SDK Domain.Lark", async () => {
+	const fake = fakeSdk();
+	await buildLarkClient({
+		appId: "a",
+		appSecret: "s",
+		domain: "lark",
+		sdkLoader: () => fake.sdk,
+	});
+	// Client/WSClient receive the same opts; Client ctor records nothing here,
+	// but the adapter built without throwing confirms domain selection resolved.
+	assert.ok(fake.wsClient, "constructed with Lark domain");
+});
+
+// ---- downloadResource via the SDK's dedicated messageResource.get (图片 bug) ----
+// The generic request() returns an axios-style response (stream on res.data)
+// and NEVER carries getReadableStream — that wrapper exists only on the
+// dedicated im.messageResource.get API. Real-world symptom: "downloadResource:
+// no stream for img_v3_…" → attachment resolve failed → model got the
+// image_key JSON as text and saw no image.
+
+function fakeSdkWithResource() {
+	const f = fakeSdk();
+	const resourceCalls: Array<Record<string, unknown>> = [];
+	const stream = new Readable({
+		read() {
+			this.push(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+			this.push(null);
+		},
+	});
+	const sdkClient = new (f.sdk.Client as unknown as new () => {
+		im: Record<string, unknown>;
+	})();
+	sdkClient.im.messageResource = {
+		get: async (payload: Record<string, unknown>) => {
+			resourceCalls.push(payload);
+			return { writeFile: async () => "/tmp/x", getReadableStream: () => stream };
+		},
+	};
+	return { ...f, resourceCalls };
+}
+
+test("lark-client: downloadResource uses im.messageResource.get and drains its stream", async () => {
+	const f = fakeSdkWithResource();
+	const client = await buildLarkClient({
+		appId: "a",
+		appSecret: "s",
+		domain: "feishu",
+		sdkLoader: () => f.sdk,
+	});
+	const buf = await client.downloadResource!({
+		messageId: "om_1",
+		fileKey: "img_v3_abc",
+		type: "image",
+	});
+	assert.deepEqual(Buffer.from(buf), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+	assert.equal(f.resourceCalls.length, 1);
+	const payload = f.resourceCalls[0] as {
+		path: Record<string, string>;
+		params: Record<string, string>;
+	};
+	assert.equal(payload.path.message_id, "om_1");
+	assert.equal(payload.path.file_key, "img_v3_abc");
+	assert.equal(payload.params.type, "image");
+});

@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+
+# build output — deliberately COMMITTED (see package.json dsh.bundle):
+# the "install straight from GitHub" path takes the repo as-is and never runs
+# a build, so dist/ must be present in git. Same rule as dsh-voice-local.
+# dist/
+
+# packaged tarballs
+*.tgz
+
+# logs & env
+*.log
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# bridge runtime state (if ever created here)
+.dsh/
+
+# research/ is private local material (surveys + cloned reference repos) — never published
+research/
+.playwright-mcp/
+
+# ad-hoc local scratch scripts (vision/OCR probes, throwaway tools) — never publish
+.vision.*.mjs
+.*.tmp.mjs
+.tmp*/
+
