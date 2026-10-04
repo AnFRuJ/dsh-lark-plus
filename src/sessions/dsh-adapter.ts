@@ -1005,7 +1005,18 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 						} else if (!a.imageRef) {
 							parts.push("\n\n[用户发送了图片，但未能保存（无附件服务）]");
 						}
-					} else if (a.kind === "file" && a.textPreview) {
+					} else if (a.kind === "file" && a.voice) {
+					// Voice note: the transcript is already the message text above, so this
+					// note says what happened instead of claiming text extraction failed.
+					// The file part is what the Web GUI turns into a player (the client half
+					// hides the card and appends <audio>), so keep them in sync.
+					if (a.fileRef) content.push({ type: "file", attachment: a.fileRef });
+					parts.push(
+						a.voice.transcribed
+							? `\n\n[语音 ${a.voice.seconds}s：已在本机转写为上方文字，可在 DSH 网页端回放]`
+							: `\n\n[语音 ${a.voice.seconds}s：未能转写（音频已保存${a.path && !a.path.startsWith("feishu://") ? ": " + a.path : ""}）]`,
+					);
+				} else if (a.kind === "file" && a.textPreview) {
 						parts.push(`\n\n[附件 ${a.name ?? "文件"} 内容]\n${a.textPreview}`);
 					} else if (a.kind === "file") {
 						parts.push(`\n\n[附件 ${a.name ?? "文件"}（未能提取文本）]`);

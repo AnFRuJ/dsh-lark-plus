@@ -16,6 +16,11 @@ export interface AttachmentInput {
   name?: string;
   /** Extracted text preview (bounded) for inbound files. */
   textPreview?: string;
+  /** Inbound voice note: lets the adapter emit a voice-aware note AND attach
+   *  the clip as a real file part (see ./dsh-adapter.ts). */
+  voice?: { seconds: number; transcribed: boolean };
+  /** Durable ref from ctx.attachments.saveFile — makes a real FileBlock. */
+  fileRef?: unknown;
   /** Inbound Feishu image — durable attachment ref for an ImageBlock. */
   imageRef?: {
     attachmentId: string;

@@ -6,6 +6,26 @@
 > offline voice-message transcription. Entries below `0.1.0` describe the
 > upstream history that this fork inherits.
 
+## 0.1.1 — 2026-10-04
+
+### 修复
+- **语音的播放条不见了、正文下面只剩一行 `[附件 …（未能提取文本）]`**：fork 时丢了上游
+  「把语音挂成真 file 附件」的那一步 —— 音频只以**文字**形式进会话，Web GUI 里根本没有附件卡片，
+  客户端装饰器自然无对象可挂。现在：
+  - 宿主把落盘的语音经 `ctx.attachments.saveFile` 拿到 `fileRef`，适配器推送真正的
+    `{ type: "file", attachment: fileRef }` 部件 → GUI 渲染出卡片；
+  - 客户端改为从卡片标题里**提取文件名**（标题是显示串，可能带 `[语音 3.0s] `、绝对路径、
+    `（未能提取文本）` 之类后缀），再隐藏卡片、在正文下方挂 `<audio>`；
+  - 语音不再套用「（未能提取文本）」这句通用文件提示：已转写就写
+    「语音 3.0s：已在本机转写为上方文字，可在 DSH 网页端回放」，失败才写「未能转写」+ 音频路径。
+- 侧栏面板 / `/lark status` 的 **「会话: N」永远是 0**：`connection-status.ts` 里
+  `sessions` 初始化为 0 之后没有任何地方写它，于是桥一切正常也显示 0（用户据此以为没连上）。
+  现在状态路由、`/lark status`、`/status` 卡片都按**本次运行的真实会话数**输出，
+  并额外给出 `routes`（routes.json 里已知的聊天数，重启后仍在）。
+- DSH 输入框里注册的命令名只有 `/lark-plus`，而文档与飞书侧都是 `/lark`：于是在
+  Web GUI 输入框敲 `/lark status` 不会被拦截，会当成普通消息发给模型。现在
+  **`/lark` 与 `/lark-plus` 两个名字都注册**（同一实现、都带 input hint），两侧命令名统一。
+
 ## Unreleased
 
 ### 新增：网页端可直接播放语音

@@ -426,7 +426,7 @@ export function helpCard(): unknown {
 			"- `/goal` 等 DSH 命令原样执行",
 			"- skill 无需前缀：直接说任务（如「用 X skill 做 Y」）",
 		].join("\n"),
-		{ header: "Lark Link 帮助", accent: true },
+		{ header: "Lark Plus 帮助", accent: true },
 	);
 }
 
@@ -502,7 +502,7 @@ export function setupCard(qrUrl: string, expireInSec: number): unknown {
 			`二维码有效期 ${expireInSec}s，或用链接手动打开：`,
 			qrUrl,
 		].join("\n"),
-		{ header: "Lark Link 设置", accent: true },
+		{ header: "Lark Plus 设置", accent: true },
 	);
 }
 

@@ -1,4 +1,4 @@
-// Shared domain types for the Lark Link bridge. Harness-agnostic: no DSH and
+// Shared domain types for the Lark Plus bridge. Harness-agnostic: no DSH and
 // no Feishu SDK imports in this file.
 
 /** Feishu message types we care about. */

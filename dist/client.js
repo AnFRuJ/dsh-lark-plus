@@ -75,11 +75,13 @@ window.__ModuleLoader__.load({
 		*/
 		function installVoicePlayers(ctx) {
 			if (doc?.body === void 0 || doc.body === null) return;
-			const AUDIO_NAME = /\.(ogg|oga|opus|mp3|wav|m4a|aac|flac|bin)$/i;
 			const PLAYER = "data-lark-plus-player";
 			const CARD = "data-lark-plus-card";
 			const ROW = "[data-message-attachments]";
 			const BASE = "/plugins/lark-plus/audio?name=";
+			/** Extensions the host route will serve (keep in sync with
+			*  src/host/voice-audio-route.ts). */
+			const CLIP = /([^\\/\s]+\.(?:ogg|oga|opus|mp3|wav|m4a|aac|flac|weba|bin))/i;
 			for (const stale of Array.from(doc.querySelectorAll("style[data-lark-plus-style]"))) stale.remove();
 			const style = doc.createElement("style");
 			style.setAttribute("data-lark-plus-style", "");
@@ -94,8 +96,8 @@ window.__ModuleLoader__.load({
 				for (let i = 0; i < cards.length; i += 1) {
 					const card = cards[i];
 					if (card === void 0) continue;
-					const name = nameOf(card);
-					if (name === "" || !AUDIO_NAME.test(name)) continue;
+					const name = CLIP.exec(nameOf(card))?.[1];
+					if (name === void 0) continue;
 					card.setAttribute(CARD, "");
 					if (!wanted.includes(name)) wanted.push(name);
 				}
@@ -176,7 +178,7 @@ window.__ModuleLoader__.load({
 				const showQr = state === "setup";
 				const button = h("button", {
 					type: "button",
-					title: "Lark Link",
+					title: "Lark Plus",
 					onClick: () => setOpen((v) => !v),
 					style: {
 						display: "inline-flex",
@@ -227,7 +229,7 @@ window.__ModuleLoader__.load({
 				} }, view.hint) : null;
 				const qrImg = showQr ? h("img", {
 					src: `${origin}/plugins/lark-plus/qr?t=${qrTs}`,
-					alt: "Lark Link setup QR",
+					alt: "Lark Plus setup QR",
 					onError: () => setQrLoaded(false),
 					onLoad: () => setQrLoaded(true),
 					style: {
@@ -272,7 +274,7 @@ window.__ModuleLoader__.load({
 					justifyContent: "space-between",
 					alignItems: "center",
 					marginBottom: "10px"
-				} }, h("strong", { style: { fontSize: "13px" } }, "🪶 Lark Link"), h("button", {
+				} }, h("strong", { style: { fontSize: "13px" } }, "🪶 Lark Plus"), h("button", {
 					type: "button",
 					onClick: () => setOpen(false),
 					style: {
@@ -291,7 +293,7 @@ window.__ModuleLoader__.load({
 				name: "sidebar.footer.action",
 				id: "lark-plus-entry",
 				order: 100,
-				label: "Lark Link"
+				label: "Lark Plus"
 			}, SidebarAction));
 		}
 		//#endregion

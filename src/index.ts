@@ -400,6 +400,21 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			};
 		}
 	).webServer;
+	// Live conversation count of THIS run. connection-status.ts ships
+	// `sessions: 0` and nothing ever wrote to it, so a fully working bridge
+	// still showed “会话: 0” in the sidebar panel and in /lark status — the one
+	// number a user checks to decide whether the bridge works at all.
+	// `conversations` is assembled later in this scope (see #conversations), so
+	// this only ever runs long after bootstrap; the catch covers the gap.
+	const liveSessions = (): number => {
+		try {
+			return conversations.keys().length;
+		} catch {
+			return 0;
+		}
+	};
+	/** status snapshot with the live counters filled in (see liveSessions). */
+	const statusWithLive = () => ({ ...status.get(), sessions: liveSessions() });
 	if (webServer) {
 		ctx.effect(
 			() =>
@@ -445,7 +460,14 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 							"Content-Type": "application/json; charset=utf-8",
 							"Cache-Control": "no-store",
 						});
-						r.end(JSON.stringify({ ...status.get(), configured }));
+						r.end(
+						JSON.stringify({
+							...statusWithLive(),
+							configured,
+							// Chats this bridge knows (persisted routes, survives restarts).
+							routes: routeStore.all().length,
+						}),
+					);
 					},
 				}),
 			"lark-plus: webui status route",
@@ -1113,9 +1135,9 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				await durableReply(
 					name,
 					msg,
-					formatStatusLine(status.get()) +
+					formatStatusLine(statusWithLive()) +
 						"\n\n" +
-						statusDetailLines(status.get()).join("\n") +
+						statusDetailLines(statusWithLive()).join("\n") +
 						"\n\n" +
 						sessionStatusBlock({
 							sessionId: statusSessionId,
@@ -1142,9 +1164,9 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				if (!arg) {
 					await durableReply(name, 
 						msg,
-						formatStatusLine(status.get()) +
+						formatStatusLine(statusWithLive()) +
 							"\n\n" +
-							statusDetailLines(status.get()).join("\n"),
+							statusDetailLines(statusWithLive()).join("\n"),
 					);
 					return true;
 				}
@@ -2574,7 +2596,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	const runLarkSubcommand = async (sub: string): Promise<string> => {
 		switch (sub) {
 			case "status":
-				return formatStatusLine(status.get());
+				return formatStatusLine(statusWithLive());
 			case "start":
 				await startBridge();
 				return lifecycleStarted
@@ -2594,19 +2616,25 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			case "uninstall-clean":
 				return await runUninstallClean();
 			default:
-				return "Lark Link 用法：/lark setup | start | stop | restart | status | uninstall-clean";
+				return "Lark Plus 用法：/lark setup | start | stop | restart | status | uninstall-clean";
 		}
 	};
-	// Single /lark command with subcommand dispatch (DSH command names
-	// can't contain spaces — the space separates name from input — so
-	// `/lark setup` is command 'lark-plus' + input 'setup').
-	registerCmd(
-		"lark-plus",
-		"Feishu/Lark bridge — usage: /lark setup|start|stop|restart|status|uninstall-clean",
-		async (rawInput) =>
-			runLarkSubcommand((rawInput.trim().split(/\s+/)[0] ?? "").toLowerCase()),
-		"setup|start|stop|restart|status|uninstall-clean",
-	);
+	// One implementation, two command names. Subcommand dispatch, because DSH
+	// command names cannot contain spaces (the space separates name from input,
+	// so `/lark setup` = command 'lark' + input 'setup').
+	//
+	// `lark` is the name users type (and the one the Feishu side answers to, so
+	// both sides of the bridge read the same); `lark-plus` mirrors the package
+	// name and used to be the only one — it keeps working so nobody's muscle
+	// memory breaks. The input hint is REQUIRED for the composer to claim a
+	// line with arguments (see registerCmd).
+	const runLarkCommand = async (rawInput: string): Promise<string> =>
+		runLarkSubcommand((rawInput.trim().split(/\s+/)[0] ?? "").toLowerCase());
+	const LARK_USAGE = "Feishu/Lark bridge — usage: /lark setup|start|stop|restart|status|uninstall-clean";
+	const LARK_HINT = "setup|start|stop|restart|status|uninstall-clean";
+	for (const commandName of ["lark", "lark-plus"]) {
+		registerCmd(commandName, LARK_USAGE, runLarkCommand, LARK_HINT);
+	}
 
 	/**
 	 * Locate the DSH session log for a bridge session id. Persisted logs live

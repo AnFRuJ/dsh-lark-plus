@@ -28,8 +28,14 @@ export interface FeishuSender {
   listMessages(params: { chatId: string; startTimeMs: number; endTimeMs: number }): Promise<Array<{ messageId: string; timestampMs: number }>>;
 }
 
-/** DSH image-attachment service surface (ctx.attachments). */
+/** DSH attachment service surface (ctx.attachments). */
 export interface ImageAttachmentService {
+  /**
+   * Persist a non-image file (voice clips). The returned ref is what makes the
+   * followup carry a REAL file part instead of a mere text note — without it
+   * the Web GUI has nothing to render, so the audio player never appears.
+   */
+  saveFile?(input: { data: Uint8Array; name?: string }): Promise<unknown>;
   saveImage(input: {
     data: Uint8Array;
     mediaType: "image/png" | "image/jpeg" | "image/webp" | "image/gif";

@@ -181,11 +181,14 @@ const STATE_VIEW: Record<
  */
 function installVoicePlayers(ctx: ClientContext): void {
 	if (doc?.body === undefined || doc.body === null) return;
-	const AUDIO_NAME = /\.(ogg|oga|opus|mp3|wav|m4a|aac|flac|bin)$/i;
+	// A clip name inside a card title, e.g. "[语音 3.0s] feishu-…-baeb1g.ogg",
 	const PLAYER = "data-lark-plus-player";
 	const CARD = "data-lark-plus-card";
 	const ROW = "[data-message-attachments]";
 	const BASE = "/plugins/lark-plus/audio?name=";
+	/** Extensions the host route will serve (keep in sync with
+	 *  src/host/voice-audio-route.ts). */
+	const CLIP = /([^\\/\s]+\.(?:ogg|oga|opus|mp3|wav|m4a|aac|flac|weba|bin))/i;
 	for (const stale of Array.from(doc.querySelectorAll("style[data-lark-plus-style]"))) stale.remove();
 	const style = doc.createElement("style");
 	style.setAttribute("data-lark-plus-style", "");
@@ -207,8 +210,13 @@ function installVoicePlayers(ctx: ClientContext): void {
 		for (let i = 0; i < cards.length; i += 1) {
 			const card = cards[i];
 			if (card === undefined) continue;
-			const name = nameOf(card);
-			if (name === "" || !AUDIO_NAME.test(name)) continue;
+			// Extract the FILE NAME the playback route needs — the title is a
+			// display string (voice label, absolute path, maybe a trailing
+			// "（未能提取文本）"-style note), so match the clip inside it instead
+			// of requiring the whole title to be a file name. Requiring that is
+			// exactly why decorated attachments got no player before.
+			const name = CLIP.exec(nameOf(card))?.[1];
+			if (name === undefined) continue;
 			card.setAttribute(CARD, "");
 			if (!wanted.includes(name)) wanted.push(name);
 		}
@@ -308,7 +316,7 @@ export function apply(ctx: ClientContext): void {
 			"button",
 			{
 				type: "button",
-				title: "Lark Link",
+				title: "Lark Plus",
 				onClick: () => setOpen((v) => !v),
 				style: {
 					display: "inline-flex",
@@ -400,7 +408,7 @@ export function apply(ctx: ClientContext): void {
 		const qrImg = showQr
 			? h("img", {
 					src: `${origin}/plugins/lark-plus/qr?t=${qrTs}`,
-					alt: "Lark Link setup QR",
+					alt: "Lark Plus setup QR",
 					onError: () => setQrLoaded(false),
 					onLoad: () => setQrLoaded(true),
 					style: {
@@ -475,7 +483,7 @@ export function apply(ctx: ClientContext): void {
 						marginBottom: "10px",
 					},
 				},
-				h("strong", { style: { fontSize: "13px" } }, "🪶 Lark Link"),
+				h("strong", { style: { fontSize: "13px" } }, "🪶 Lark Plus"),
 				h(
 					"button",
 					{
@@ -514,7 +522,7 @@ export function apply(ctx: ClientContext): void {
 				name: "sidebar.footer.action",
 				id: "lark-plus-entry",
 				order: 100,
-				label: "Lark Link",
+				label: "Lark Plus",
 			},
 			SidebarAction,
 		),

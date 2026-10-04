@@ -4,7 +4,7 @@
 // awaited and failures are logged (pi-feishu-link lesson #4).
 
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { FeishuInboundMessage } from "../common/types.ts";
 import type { BridgeContextRead } from "./bridge-context.ts";
 import type { CommandRouter } from "./command-router.ts";
@@ -219,6 +219,7 @@ export async function resolveInboundAttachments(
 					// about is the one failure mode worse than a longer filename.
 					const stem = `feishu-${sanitizeAttachmentName(msg.messageId)}-${msg.timestamp}-${sanitizeAttachmentName(key.slice(-6))}`;
 					let localPath: string | undefined;
+					let transcribed = false;
 					const persisted = voice
 						? voice.persistRawAudio(buf, stem, inboundDir)
 						: persistAudioFallback(buf, stem, inboundDir);
@@ -227,13 +228,36 @@ export async function resolveInboundAttachments(
 					if (voice && transcribe && localPath) {
 						const outcome = await voice.transcribeRaw(localPath, durationMs);
 						for (const e of outcome.errors) ctx.logger.warn(`voice: ${e}`);
-						if (outcome.text) msg.text = outcome.text;
+						if (outcome.text) {
+							msg.text = outcome.text;
+							transcribed = true;
+						}
 					}
-					out.push({
+					const clipName = localPath
+						? basename(localPath)
+						: "feishu-audio.ogg";
+					const attach: AttachmentInput = {
 						path: localPath ?? "feishu://audio",
 						kind: "file",
-						name: `[语音 ${seconds}s] ${localPath ?? "feishu://audio"}`,
-					});
+						name: `[语音 ${seconds}s] ${clipName}`,
+						voice: { seconds: Number(seconds) || 0, transcribed },
+					};
+					// A durable file ref is what makes this a REAL file part in the session:
+					// the Web GUI renders a card for it and the client half replaces that card
+					// with an <audio> player. Without the ref the clip exists only as the text
+					// note added by the adapter, there is no card to decorate, and voice
+					// messages silently lose their player (that is what happened here).
+					const store = ctx.attachments;
+					if (store?.saveFile) {
+						try {
+							attach.fileRef = await store.saveFile({ data: buf, name: clipName });
+						} catch (err) {
+							ctx.logger.warn(
+								`inbound audio saveFile failed: ${err instanceof Error ? err.message : String(err)}`,
+							);
+						}
+					}
+					out.push(attach);
 				}
 			}
 		} else if (msg.msgType === "file") {

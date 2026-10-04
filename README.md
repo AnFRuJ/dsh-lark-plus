@@ -11,6 +11,8 @@
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/npm/v/dsh-lark-plus?label=npm" alt="npm"/>
+  <img src="https://img.shields.io/npm/dm/dsh-lark-plus?label=downloads" alt="downloads"/>
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT"/>
   <img src="https://img.shields.io/badge/node-%3E%3D24-green" alt="node"/>
   <img src="https://img.shields.io/badge/bridge-Feishu%20%7C%20Lark-blue" alt="bridge"/>
@@ -62,6 +64,9 @@
 安装（DSH 官方 bundle 机制，产物已随仓库提交，不执行构建脚本）：
 
 ```bash
+# 从 npm 安装（推荐，已发布 0.1.0）
+dsh plugin --profile <你的档> add dsh-lark-plus
+
 # 从 GitHub 仓库安装（跟进尚未发版的提交用这条）
 dsh plugin --profile <你的档> add github:AnFRuJ/dsh-lark-plus
 

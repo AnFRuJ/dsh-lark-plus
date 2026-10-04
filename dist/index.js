@@ -649,6 +649,12 @@ function createDshAdapter(deps) {
 						});
 						if (a.path && !a.path.startsWith("feishu://")) parts.push(`\n\n[用户发送了图片，已保存到本地: ${a.path}（需要查看时用 read_image 工具读取该路径）]`);
 						else if (!a.imageRef) parts.push("\n\n[用户发送了图片，但未能保存（无附件服务）]");
+					} else if (a.kind === "file" && a.voice) {
+						if (a.fileRef) content.push({
+							type: "file",
+							attachment: a.fileRef
+						});
+						parts.push(a.voice.transcribed ? `\n\n[语音 ${a.voice.seconds}s：已在本机转写为上方文字，可在 DSH 网页端回放]` : `\n\n[语音 ${a.voice.seconds}s：未能转写（音频已保存${a.path && !a.path.startsWith("feishu://") ? ": " + a.path : ""}）]`);
 					} else if (a.kind === "file" && a.textPreview) parts.push(`\n\n[附件 ${a.name ?? "文件"} 内容]\n${a.textPreview}`);
 					else if (a.kind === "file") parts.push(`\n\n[附件 ${a.name ?? "文件"}（未能提取文本）]`);
 					content[0] = {
@@ -2800,19 +2806,38 @@ async function resolveInboundAttachments(msg, ctx, inboundDir, voice, transcribe
 					const seconds = durationMs > 0 ? (durationMs / 1e3).toFixed(1) : "?";
 					const stem = `feishu-${sanitizeAttachmentName(msg.messageId)}-${msg.timestamp}-${sanitizeAttachmentName(key.slice(-6))}`;
 					let localPath;
+					let transcribed = false;
 					const persisted = voice ? voice.persistRawAudio(buf, stem, inboundDir) : persistAudioFallback(buf, stem, inboundDir);
 					localPath = persisted.localPath;
 					for (const e of persisted.errors) ctx.logger.warn(`voice: ${e}`);
 					if (voice && transcribe && localPath) {
 						const outcome = await voice.transcribeRaw(localPath, durationMs);
 						for (const e of outcome.errors) ctx.logger.warn(`voice: ${e}`);
-						if (outcome.text) msg.text = outcome.text;
+						if (outcome.text) {
+							msg.text = outcome.text;
+							transcribed = true;
+						}
 					}
-					out.push({
+					const clipName = localPath ? basename(localPath) : "feishu-audio.ogg";
+					const attach = {
 						path: localPath ?? "feishu://audio",
 						kind: "file",
-						name: `[语音 ${seconds}s] ${localPath ?? "feishu://audio"}`
-					});
+						name: `[语音 ${seconds}s] ${clipName}`,
+						voice: {
+							seconds: Number(seconds) || 0,
+							transcribed
+						}
+					};
+					const store = ctx.attachments;
+					if (store?.saveFile) try {
+						attach.fileRef = await store.saveFile({
+							data: buf,
+							name: clipName
+						});
+					} catch (err) {
+						ctx.logger.warn(`inbound audio saveFile failed: ${err instanceof Error ? err.message : String(err)}`);
+					}
+					out.push(attach);
 				}
 			}
 		} else if (msg.msgType === "file") {
@@ -4032,7 +4057,7 @@ function helpCard() {
 		"- `/goal` 等 DSH 命令原样执行",
 		"- skill 无需前缀：直接说任务（如「用 X skill 做 Y」）"
 	].join("\n"), {
-		header: "Lark Link 帮助",
+		header: "Lark Plus 帮助",
 		accent: true
 	});
 }
@@ -5473,6 +5498,18 @@ function apply(ctx, rawConfig) {
 	const maskId = (id) => id.length <= 8 ? "****" : `${id.slice(0, 6)}…${id.slice(-4)}`;
 	let activeQr;
 	const webServer = ctx.webServer;
+	const liveSessions = () => {
+		try {
+			return conversations.keys().length;
+		} catch {
+			return 0;
+		}
+	};
+	/** status snapshot with the live counters filled in (see liveSessions). */
+	const statusWithLive = () => ({
+		...status.get(),
+		sessions: liveSessions()
+	});
 	if (webServer) {
 		ctx.effect(() => webServer.register({
 			kind: "exact",
@@ -5502,8 +5539,9 @@ function apply(ctx, rawConfig) {
 					"Cache-Control": "no-store"
 				});
 				r.end(JSON.stringify({
-					...status.get(),
-					configured
+					...statusWithLive(),
+					configured,
+					routes: routeStore.all().length
 				}));
 			}
 		}), "lark-plus: webui status route");
@@ -5993,7 +6031,7 @@ function apply(ctx, rawConfig) {
 					if (statusLive && statusTitles?.get) statusTitle = statusTitles.get(statusLive)?.title;
 				} catch {}
 				const statusModel = liveModelFor(statusKey);
-				await durableReply(name, msg, formatStatusLine(status.get()) + "\n\n" + statusDetailLines(status.get()).join("\n") + "\n\n" + sessionStatusBlock({
+				await durableReply(name, msg, formatStatusLine(statusWithLive()) + "\n\n" + statusDetailLines(statusWithLive()).join("\n") + "\n\n" + sessionStatusBlock({
 					sessionId: statusSessionId,
 					title: statusTitle,
 					workspace: convCfg.get(statusKey).workspaceRoot ?? (getCfg().workspaceRoot || process.cwd()),
@@ -6006,7 +6044,7 @@ function apply(ctx, rawConfig) {
 			case "lark-config": {
 				const arg = _rawInput.trim();
 				if (!arg) {
-					await durableReply(name, msg, formatStatusLine(status.get()) + "\n\n" + statusDetailLines(status.get()).join("\n"));
+					await durableReply(name, msg, formatStatusLine(statusWithLive()) + "\n\n" + statusDetailLines(statusWithLive()).join("\n"));
 					return true;
 				}
 				const eq = arg.indexOf("=");
@@ -6874,7 +6912,7 @@ function apply(ctx, rawConfig) {
 	};
 	const runLarkSubcommand = async (sub) => {
 		switch (sub) {
-			case "status": return formatStatusLine(status.get());
+			case "status": return formatStatusLine(statusWithLive());
 			case "start":
 				await startBridge();
 				return lifecycleStarted ? "bridge started" : startBlocker ?? "bridge 未启动";
@@ -6887,10 +6925,13 @@ function apply(ctx, rawConfig) {
 				return lifecycleStarted ? "bridge restarted" : startBlocker ?? "bridge 未启动";
 			case "setup": return await runSetup();
 			case "uninstall-clean": return await runUninstallClean();
-			default: return "Lark Link 用法：/lark setup | start | stop | restart | status | uninstall-clean";
+			default: return "Lark Plus 用法：/lark setup | start | stop | restart | status | uninstall-clean";
 		}
 	};
-	registerCmd("lark-plus", "Feishu/Lark bridge — usage: /lark setup|start|stop|restart|status|uninstall-clean", async (rawInput) => runLarkSubcommand((rawInput.trim().split(/\s+/)[0] ?? "").toLowerCase()), "setup|start|stop|restart|status|uninstall-clean");
+	const runLarkCommand = async (rawInput) => runLarkSubcommand((rawInput.trim().split(/\s+/)[0] ?? "").toLowerCase());
+	const LARK_USAGE = "Feishu/Lark bridge — usage: /lark setup|start|stop|restart|status|uninstall-clean";
+	const LARK_HINT = "setup|start|stop|restart|status|uninstall-clean";
+	for (const commandName of ["lark", "lark-plus"]) registerCmd(commandName, LARK_USAGE, runLarkCommand, LARK_HINT);
 	/**
 	* Locate the DSH session log for a bridge session id. Persisted logs live
 	* at <DSH_HOME>/sessions/<workspace-dir>/<encoded-session-id>/session.jsonl.zstd
