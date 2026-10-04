@@ -6,6 +6,66 @@
 > offline voice-message transcription. Entries below `0.1.0` describe the
 > upstream history that this fork inherits.
 
+## Unreleased
+
+### 新增：网页端可直接播放语音
+
+- 宿主新增只读路由 `GET /plugins/lark-plus/audio?name=…`（`src/host/voice-audio-route.ts`）：
+  只服务 `<inboundDir>/media` 下**白名单扩展名的裸文件名**，支持 Range（拖动进度条），
+  走的是桥已经落盘的同一份文件，不会重新去飞书下载。
+- 客户端半（`src/client/index.ts`）新增 `installVoicePlayers()`：把音频附件卡片隐藏，
+  并在**正文下方**追加 `<audio controls>` —— 一条语音在界面上就是「上面文字、下面播放条」。
+  只追加兄弟节点 + 打属性，不改 React 的子节点；重渲染抹掉后由 MutationObserver 补回，
+  按文件名去重不会堆叠。
+- 新增 `test/unit/host/voice-audio-route.test.ts`：裸名/路径穿越/扩展名白名单、
+  200 / 206 Range / HEAD / 404 / 405。
+
+### 新增：飞书侧会话可见性 + 可点指令面板
+
+- `/status` 末尾追加「当前会话」段（会话 ID / 标题 / 工作区 / 模式 / 模型 + 切换指引）。
+- `/sessions` 改为与 `/resume` 同一张卡片（本工作区历史会话，当前会话按钮置灰）；
+  旧实现只列 `dm:oc_…` 这类内部 key，对用户没有信息量。
+- `/menu` 新增；`/help` 也带上同一排按钮。`commandPanelButtons()` 是按钮的唯一来源，
+  `commandPanelCard()` 复用它；按钮 op 就是**裸命令名**（卡片回调已把未识别的 op
+  转发给 `bridgeHandler`），所以**不需要**去飞书开放平台配置那个 per-application
+  的「/」菜单 —— 装上就能点。
+
+### 修复：DSH 宿主里语音转不出文字（Electron 44 / Node 24）
+
+- `src/voice/wav.ts`（新增）：纯 JS 解析 RIFF/PCM（8/16/24/32 位、float32、任意声道下混、
+  线性插值重采样到 16 kHz）。此前走 sherpa-onnx 的 `readWaveFromBinary()`，而
+  **Electron 44 / Node 24 禁用了 napi 外部缓冲区**，它和 `readWave()` 都会抛
+  `External buffers are not allowed` → 转写路由 400 decode-failed，飞书里只看到「（未能提取文本）」。
+  识别仍走 `acceptWaveform(Float32Array)`（拷贝语义，不受影响）。
+- 新增 `test/unit/voice/wav.test.ts`（4 例）：解码、下混、重采样、坏容器。
+
+### 修复：侧栏会话显示「未命名」
+
+- 会话 ID 改为**路径安全**。DSH 的 per-record JSON 存储
+  （`~/.dsh/storages/session_projcache/sessions/<id>.json`）只接受 `[A-Za-z0-9_-]`；
+  旧的 `lark-plus:dm:…` 带冒号 → 投影缓存写入被拒 → 重启后侧栏全是「未命名」，
+  点进去（变 live）才显示真名。现为 `lark-plus-dm-…`。
+- 每轮结束（`turn/end`）后延迟 2.5 s 调 `sessionProjectionCache.write(session)`，
+  让**冷会话**也有带标题的投影缓存。
+
+### 修复：/resume 报「该工作区暂无历史会话日志」
+
+- DSH 现在把日志写成 `session.v4.jsonl.zstd`，扫描却只认 `session.jsonl.zstd` → 永远找不到。
+  `sessionLogPath()` 兼容两种命名，并直接从日志的 `session/title` 记录取标题，
+  列表不再是一排「会话」。
+
+### 新增：会话接续失败会被明确告知
+
+- `ensureAgent` 无法 resume 持久化的 activeSessionId 时（此前静默新开会话，表现为
+  「有时接续、有时重开」），现在会往该聊天发一条含**失败原因**的提示，并指引
+  `/sessions` / `/resume` 切回原会话。
+
+### 工程
+
+- 修掉 `test/voice-routing.test.ts` 的 3 个隐式 any（`npm run check` 现在全绿）。
+- CI / Publish 工作流改用 pnpm（仓库只有 `pnpm-lock.yaml`，`npm ci` 会直接失败）。
+- LICENSE 补 fork 侧版权行；package.json 补 `author` / `homepage` / `bugs` / `engines`。
+
 ## 0.1.0 (fork)
 
 ### 新增：飞书语音消息 → 本地离线转写
@@ -19,15 +79,15 @@
   正文留空并把原因写进日志。
 - 新增本地路由 `POST /dsh-voice-local/v1/transcribe`（16 kHz WAV → `{ok,text}`）、
   `GET .../health`、`GET .../model/status`、`POST .../model/download`。
-- 插件身份与命令改名以避开与上游同装：包名 `dsh-lark-voice`、命令 `/lark-voice`、
-  状态目录 `~/.dsh/lark-voice`、路由前缀 `/plugins/lark-voice/*`。
+- 插件身份与命令改名以避开与上游同装：包名 `dsh-lark-plus`、命令 `/lark`、
+  状态目录 `~/.dsh/lark`、路由前缀 `/plugins/lark-plus/*`。
 - 测试：`test/voice-smoke.test.ts`（真实模型 + 真实 ffmpeg；资产缺失时自动 skip）。
 
 ## 0.5.5
 
 ### Feature: setup 持久化 user_info 并申请用户基本信息权限 (GH #12)
 
-`/lark-voice setup` 注册时 `registerApp` 已请求并返回扫码者的 `user_info`（`open_id` + `tenant_brand`），此前只用来判断 feishu/lark-voice 域，其余字段被丢弃；且应用缺少通讯录字段权限，配套插件无法把 `open_id` 解析成姓名/头像。
+`/lark setup` 注册时 `registerApp` 已请求并返回扫码者的 `user_info`（`open_id` + `tenant_brand`），此前只用来判断 feishu/lark 域，其余字段被丢弃；且应用缺少通讯录字段权限，配套插件无法把 `open_id` 解析成姓名/头像。
 
 - **持久化 `userInfo`**：setup 成功后写入凭据 blob（`{appId, appSecret, domain, userInfo}`）；无 `user_info` 或全空载荷**不写该键**，手动 `DSH_LARK_APP_ID/SECRET` 通道与历史 blob 形状不变。
 - **`parseCredentials` 透传 `userInfo`**：该函数逐字段重建对象，不显式拷贝会在每次读取时静默丢失。
@@ -37,7 +97,7 @@
 
 Closes #12
 
-**Full Changelog**: https://github.com/amlyczz/dsh-lark-voice/compare/v0.5.4...v0.5.5
+**Full Changelog**: https://github.com/amlyczz/dsh-lark-plus/compare/v0.5.4...v0.5.5
 
 ## 0.5.4
 
@@ -52,7 +112,7 @@ DSH 内置 agent-presets roster 是 `standard | ptc | minimal | cordis`，**没�
 - **未知 preset 警告**：创建 agent 时若 `agentPresets.list()` 可用且解析后的 id 不在 roster，记 warning，便于 DSH 调整 roster 后尽早发现。
 - **文档与测试**：README 默认值/roster 说明更新；新增 `normalizeAgentPreset` 与 create/resume 归一的回归测试，不再把 `"code"` 固化成 DSH 期望值。
 
-**Full Changelog**: https://github.com/amlyczz/dsh-lark-voice/compare/v0.5.3...v0.5.4
+**Full Changelog**: https://github.com/amlyczz/dsh-lark-plus/compare/v0.5.3...v0.5.4
 
 ## 0.5.2
 
@@ -108,14 +168,14 @@ DSH 内置 agent-presets roster 是 `standard | ptc | minimal | cordis`，**没�
 - **图片：模型找不到图片（双根因）**
   1. `ctx.get("attachments")` 在插件加载时被**一次性快照**——DSH 附件服务若晚于插件挂载（Cordis 加载顺序），永远是 `undefined`，`imageRef` 从不生成，ImageBlock 从不入 content，模型对图片一无所知。改为 **live getter**（`attachmentsRef`，违反的正是 bridge-context 自己头部声明的 GETTER 原则）。
   2. 即使无 imageRef / 非视觉模型，图片也不再**静默消失**：本地保存路径折入文本（`[用户发送了图片，已保存到本地: …]`），模型可用工具读取；post 富文本内嵌的 `{tag:"img"}` 图片现在逐个提取下载（之前只提 text_run 文字，图全丢）。图片文件名改用 `imageKey` 后缀（确定性、多图不碰撞）。
-- **入站附件改存系统临时目录 + TTL 自动清理（默认 7 天）**：图片/文件此前永久累积在 `~/.dsh/lark-voice/inbound/media/`（状态目录）。现在默认落 `os.tmpdir()` 下的 `dsh-lark-voice/inbound/`（Linux/macOS/Windows 各自的系统临时目录，OS 亦可随时回收），新增 `attachments.retentionHours`（**默认 168h = 7 天**，`/lark-config attachments.retentionHours=48` 热改生效；0 = 永久保留）与 `attachments.dir`（自定义根目录，重启生效）。启动即清扫一次（清掉上次运行遗留）+ 每小时按 mtime 清扫过期文件。旧目录 `~/.dsh/lark-voice/inbound/`（484K）已不再写入，可手动删除。**跨平台加固**：① 落盘文件名统一 `sanitizeAttachmentName`（Windows 保留字符 `<>:"/\\|?*`、控制字符、尾点/尾空格全部替换，中文保留）——macOS 截图名里的 `:` 不再产生 Windows 非法文件名；② 清扫删除带 `force + maxRetries`（Windows 上文件被占用时 EBUSY/EPERM 短暂重试，下次清扫兜底）；③ 全程 `node:path` join + 现有 `isAbsoluteAny`/`relative` 判定（round-1 GH #7 已覆盖 UNC/盘符路径），无硬编码分隔符。
+- **入站附件改存系统临时目录 + TTL 自动清理（默认 7 天）**：图片/文件此前永久累积在 `~/.dsh/lark/inbound/media/`（状态目录）。现在默认落 `os.tmpdir()` 下的 `dsh-lark-plus/inbound/`（Linux/macOS/Windows 各自的系统临时目录，OS 亦可随时回收），新增 `attachments.retentionHours`（**默认 168h = 7 天**，`/lark-config attachments.retentionHours=48` 热改生效；0 = 永久保留）与 `attachments.dir`（自定义根目录，重启生效）。启动即清扫一次（清掉上次运行遗留）+ 每小时按 mtime 清扫过期文件。旧目录 `~/.dsh/lark/inbound/`（484K）已不再写入，可手动删除。**跨平台加固**：① 落盘文件名统一 `sanitizeAttachmentName`（Windows 保留字符 `<>:"/\\|?*`、控制字符、尾点/尾空格全部替换，中文保留）——macOS 截图名里的 `:` 不再产生 Windows 非法文件名；② 清扫删除带 `force + maxRetries`（Windows 上文件被占用时 EBUSY/EPERM 短暂重试，下次清扫兜底）；③ 全程 `node:path` join + 现有 `isAbsoluteAny`/`relative` 判定（round-1 GH #7 已覆盖 UNC/盘符路径），无硬编码分隔符。
 - **非视觉模型发图报错「本轮运行失败 UNSUPPORTED_CONTENT」（qwen3.8-27b / DeepSeek 等）**：
   1. **正则漏匹配 DeepSeek**：DeepSeek 抛出 `The DeepSeek chat-completions adapter does not support image content.`（含 `content` 而非 `input`），旧正则仅匹配 `image input` 导致 DeepSeek 报错未被捕获。现提取 `isImageUnsupportedError` 全面匹配 DeepSeek、pi-ai（qwen/glm 等）、`UNSUPPORTED_CONTENT`、`unsupported_content_type` 等各类非视觉模型报错。
   2. **`agent/error` 中同步 `followup()` 导致重试死锁未唤醒**：在 `dsh-agent-loop` 中，`throwError()` 触发 `agent/error` 时 agent 仍处在 `"running"` phase 且未 abort，此时同步调用 `followup(retry)` 虽把消息放入 `inbox.nextTurn`，但 `wakeDriver(false)` 因非 idle 且非 abort 不会置 `wakeRequested = true`。随后 turn 抛错结束，`kick()` finally 看到 `wakeRequested === false` 遂直接进入 idle，重试消息永久卡在 inbox 不被执行。现改为 `await agent.whenIdle()` 停稳后再 `followup(retry)`，正确唤醒新一轮纯文本执行（带本地落盘图片路径），用户正常获得回复。
   3. **双重记忆与切模型重置**：同时按会话 (`imageUnsupportedKeys`) 与模型 (`imageUnsupportedModels`) 记忆非视觉属性；后续发图直接走纯文本落盘路径（避免每张图都走一遍报错重试）；使用 `/model` 切换模型时自动清除会话标记，切回视觉模型时可恢复 ImageBlock。
 - **流式卡片：create 请求体多包一层 `data` 导致 API 拒绝**。官方 `POST /cardkit/v1/cards` 请求体是**扁平**的 `{type:"card_json", data:"<字符串化卡片JSON>"}`（已核对官方文档请求体示例），此前实现包成 `{data:{type,data}}` 必然 4xx → 卡片永远出不来。另新增**一次性失败提示**：卡片创建失败时在聊天里说明原因（缺 CardKit 权限/客户端过旧等），不再静默回退普通消息（内容本来就不丢，现在原因可见）。
 - **/resume 选择卡片可用性 + 友好化**：
-  - 修按钮点击 bug：lark-voice 会话 id 满是冒号，卡片回调按**第一个冒号**切 op，`resume:lark-voice:dm:…` 被截成 `dm:…` → 永远「未找到会话」。按钮 op 现在传 **URI 编码**的 id，匹配侧解码并保留原始/前缀/后缀三种兜底。
+  - 修按钮点击 bug：lark-plus 会话 id 满是冒号，卡片回调按**第一个冒号**切 op，`resume:lark-plus:dm:…` 被截成 `dm:…` → 永远「未找到会话」。按钮 op 现在传 **URI 编码**的 id，匹配侧解码并保留原始/前缀/后缀三种兜底。
   - 卡片重做：相对时间（`5 分钟前`/`3 天前`）、preset 徽标、**当前会话列为禁用行**（无编号）、序号只数可恢复行（`/resume <n>` 与卡片编号严格一致）、空态与「新起会话/切工作区」提示、恢复成功回执显示会话起始时间。
 
 ### Feature: Feishu-side `/resume` — pick up historical sessions of the current workspace
@@ -187,7 +247,7 @@ DSH 内置 agent-presets roster 是 `standard | ptc | minimal | cordis`，**没�
 
 ### Other
 
-- Fixed `/lark-voice restart` pgrep pattern to match the `dsh web` invocation.
+- Fixed `/lark restart` pgrep pattern to match the `dsh web` invocation.
 - Updated Feishu group invite link.
 
 ---
@@ -211,7 +271,7 @@ DSH 内置 agent-presets roster 是 `standard | ptc | minimal | cordis`，**没�
 - **#2 修复：命令回复不再裸发** —— `bridgeHandler` 的桥命令回复（`/status /help /sessions /workspace /lark-config /mode /permission /model /new /stop …`）原直接 `sender.replyTo`（裸 await，进程死在此刻即丢），现全部改走 **durable outbox**（`command-reply`，幂等 dedupeKey），进程崩溃/重启自动补发（DSH 注册命令回复本就走 outbox，桥命令现已对齐）。
 - **#3 修复：流式卡定稿失败 → 降到 outbox** —— `cardkit-stream.finalize` 原先**吞掉** final PUT 错误（卡停在"正在流式打印"，内容丢失也不报错）。现 final PUT / 无卡时 Create 失败会 **re-throw**，event-forwarder 捕获后落回 durable outbox，内容绝不丢。
 - **#4 修复：/status 计数不实时** —— outbox 计数只在启动/60s 定时刷新。现 outbox 增加 `onStatsChange` 回调，随投递/失败/入队/清理实时刷新 `outboxPending/outboxFailed`，`/status` 与 Web 面板实时反映。
-- **#5 修复：熔断后需手动重启才恢复** —— 熔断（quota breaker / 重连耗尽）后原需人工 `/lark-voice restart`。现 connection-supervisor 在 **配额窗口过期后自动解除熔断、自动重连**（`tick` 检测 `resetAt`），完全自愈无需干预。
+- **#5 修复：熔断后需手动重启才恢复** —— 熔断（quota breaker / 重连耗尽）后原需人工 `/lark restart`。现 connection-supervisor 在 **配额窗口过期后自动解除熔断、自动重连**（`tick` 检测 `resetAt`），完全自愈无需干预。
 
 
 ---
@@ -220,8 +280,8 @@ DSH 内置 agent-presets roster 是 `standard | ptc | minimal | cordis`，**没�
 
 对齐 pi-feishu-link 2026-08-14 实机修复轮：
 
-- **修复：DSH Web GUI 中输入 `/lark-voice setup` 被当普通消息交给模型**（实测根因）。ui-commands 的 `matchEnter` 只对定义了 `input` 的命令执行带参命令，否则非裸斜杠行回落到 agent。`lark` 命令现注册 `input: { hint }`；同时飞书侧 `/lark-voice` 子命令补上分发（bridgeHandler 原缺 `lark` case）
-- **修复：`/lark-voice setup` 的 registerApp 报 `Protocol "https:" not supported. Expected "http:"`**。SDK 的 `defaultHttpInstance` 用 axios，其 1.19.x 的 `exports.default.default → index.js`（lib 源码入口）在 Node ESM 下平台解析错位，把 https 请求赶进 `http.request`。改用 fetch 实现的同协议 registerApp（device-code 流程，RFC 8628：begin → QR → poll），二维码/addons 编码与 SDK 字节兼容
+- **修复：DSH Web GUI 中输入 `/lark setup` 被当普通消息交给模型**（实测根因）。ui-commands 的 `matchEnter` 只对定义了 `input` 的命令执行带参命令，否则非裸斜杠行回落到 agent。`lark` 命令现注册 `input: { hint }`；同时飞书侧 `/lark` 子命令补上分发（bridgeHandler 原缺 `lark` case）
+- **修复：`/lark setup` 的 registerApp 报 `Protocol "https:" not supported. Expected "http:"`**。SDK 的 `defaultHttpInstance` 用 axios，其 1.19.x 的 `exports.default.default → index.js`（lib 源码入口）在 Node ESM 下平台解析错位，把 https 请求赶进 `http.request`。改用 fetch 实现的同协议 registerApp（device-code 流程，RFC 8628：begin → QR → poll），二维码/addons 编码与 SDK 字节兼容
 - **修复：飞书发消息无响应——环境 proxy 变量导致 WS 连不上**。宿主 shell 带 `http_proxy/https_proxy` 时，SDK 共享 axios 实例按 env 走代理，axios 把 https URL 赶进 `http.request` 报协议错误，WS 端点发现与长连接全部失败。`buildLarkClient` 现对 SDK 自己的 `defaultHttpInstance` 设 `proxy:false`（保留其 response 解包拦截器；新建裸 axios 会破坏 `{code,data,msg}` 解析）。另修 status 面板 `wsReady` 从未写入状态存储的问题
 - **修复：表情回执全部 400**——默认池含无效 emoji（FIRE/ROCKET/SUN/WHITE_CHECK_MARK，飞书 231001）。对齐 pi-feishu-link 的实测有效集合（大小写敏感：Fire 有效 FIRE 无效），DONE 用 `DONE` 表情；完成 DONE 表情接线（streamFor 返回真实 StreamTarget，对触发消息打 DONE，message-handler 记录 lastMessageId）
 - **修复：飞书侧 DSH 注册命令（/goal 等）全部失效**——原调 `commands.run()` 方法不存在。改调 DSH 真实 API `commands.find(agent,name)` + `commands.execute(agent,line,signal)`
@@ -265,6 +325,6 @@ DSH 内置 agent-presets roster 是 `standard | ptc | minimal | cordis`，**没�
 - 命令三级分流：桥特有（/status /doctor /sessions /workspace /stop /support /lark-config /help）→ DSH 注册命令原生调用 → 其他原样注入 agent
 - 无审批默认全放开（不注册 approval 应答者；可选 denyList 纯拒绝兜底）
 - 复用 DSH Web GUI（桥会话=原生 session 直接呈现；client 只加状态浮层与 setup 二维码）
-- `/lark-voice setup` 扫码一键建应用（registerApp + addons 显式订阅消息事件/群聊/表情权限）
+- `/lark setup` 扫码一键建应用（registerApp + addons 显式订阅消息事件/群聊/表情权限）
 - 一键诊断（脱敏诊断包）
 - 进程内插件形态（Cordis `ctx.effect` disposer 干净卸载；多宿主 gateway 锁防护）

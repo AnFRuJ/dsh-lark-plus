@@ -27,7 +27,7 @@ test("end-to-end: downloaded OGG is kept on disk and transcribed", async (t) => 
 	if (!resolveFfmpeg()) return t.skip("ffmpeg not found");
 
 	const ogg = readFileSync(oggPath);
-	const inboundDir = mkdtempSync(join(tmpdir(), "lark-voice-smoke-"));
+	const inboundDir = mkdtempSync(join(tmpdir(), "lark-plus-smoke-"));
 	const voice = createVoiceService({ warn: () => {}, info: () => {} });
 
 	const outcome = await voice.transcribe(ogg, "feishu-om_smoke", 3000, inboundDir, 1);
@@ -51,7 +51,7 @@ test("degradation: a bad ffmpeg path keeps the audio and reports the error", asy
 	if (!modelReady(modelDir)) return t.skip("SenseVoice model not installed");
 
 	const ogg = readFileSync(oggPath);
-	const inboundDir = mkdtempSync(join(tmpdir(), "lark-voice-degrade-"));
+	const inboundDir = mkdtempSync(join(tmpdir(), "lark-plus-degrade-"));
 	const voice = createVoiceService({ warn: () => {}, info: () => {} }, { ffmpegPath: "definitely-not-ffmpeg" });
 	const outcome = await voice.transcribe(ogg, "feishu-om_bad", 1000, inboundDir, 2);
 

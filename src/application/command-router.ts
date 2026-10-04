@@ -57,6 +57,9 @@ const BRIDGE_COMMANDS = new Set([
 	"resume",
 	// Feishu-side goal controller — Tier 1 renders interactive goal deck / templates.
 	"goal",
+	// Feishu-side command panel (/menu): tap-to-run buttons, so nobody needs
+	// to configure Feishu's own per-application "/" menu.
+	"menu",
 ]);
 
 

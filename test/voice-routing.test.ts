@@ -15,9 +15,9 @@ import { createVoiceService } from "../src/voice/service.ts";
 import { modelReady, resolveFfmpeg, resolveModelDir } from "../src/voice/transcribe.ts";
 const ogg = join(import.meta.dirname, "fixtures", "feishu-voice-zh.ogg");
 const ready = modelReady(resolveModelDir()) && Boolean(resolveFfmpeg());
-async function run(text) {
+async function run(text: string): Promise<{ route: unknown; received: string[] }> {
   const inboundDir = mkdtempSync(join(tmpdir(), "probe-"));
-  const received = [];
+  const received: string[] = [];
   const backend = createMemoryDshBackend({ autoReply: (k, t) => { received.push(t); return "ok"; } });
   const ctx = createBridgeContext({ logger: createLogger("t"), cfg: () => ({ ...DEFAULT_CONFIG, attachments: { ...DEFAULT_CONFIG.attachments, dir: inboundDir } }), status: createStatusStore(undefined) });
   ctx.setTransport({ async downloadResource() { return readFileSync(ogg); } } as never);

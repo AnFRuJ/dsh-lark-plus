@@ -46,7 +46,7 @@ export interface ConnectionSupervisor {
 	/** One probe cycle (also the unit-test entry). */
 	tick(): Promise<void>;
 	state(): ConnState;
-	/** Force a rebuild (e.g. /lark-voice restart, config change). */
+	/** Force a rebuild (e.g. /lark restart, config change). */
 	reconnect(): Promise<void>;
 }
 
@@ -128,7 +128,7 @@ export function createConnectionSupervisor(
 	async function tick(): Promise<void> {
 		if (stopped) return;
 		// Quarantine auto-recovery: once the quota window resets (resetAt passes),
-		// lift the breaker and try to reconnect — no manual /lark-voice restart needed.
+		// lift the breaker and try to reconnect — no manual /lark restart needed.
 		if (state === "quarantined") {
 			// liftAt === undefined means all failure records have aged out of the
 			// quota window — the breaker has implicitly reset. Either way,

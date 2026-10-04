@@ -100,7 +100,7 @@ function fakeSdk() {
 // ---- credential ref validation ----
 test("lark-client: ref pattern rejects dots (ctx.credentials requirement)", () => {
 	assert.equal(isValidRef("LARK_LINK_APP"), true);
-	assert.equal(isValidRef("lark-voice.app"), false, "dots are invalid");
+	assert.equal(isValidRef("lark-plus.app"), false, "dots are invalid");
 	assert.equal(isValidRef("9bad"), false, "must start with letter/underscore");
 });
 
@@ -219,7 +219,7 @@ test("lark-client: resolve → persist → clear round-trip", async () => {
 test("lark-client: persist rejects invalid ref", async () => {
 	const store = memStore();
 	await assert.rejects(() =>
-		persistCredentials(store, "lark-voice.app", {
+		persistCredentials(store, "lark-plus.app", {
 			appId: "a",
 			appSecret: "s",
 			domain: "feishu",

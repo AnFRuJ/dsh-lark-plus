@@ -7,6 +7,8 @@ import assert from "node:assert/strict";
 import {
 	welcomeCard,
 	commandPanelCard,
+	commandPanelButtons,
+	sessionStatusBlock,
 	statusCard,
 	markdownCard,
 	setupCard,
@@ -216,7 +218,7 @@ function resumeButtons(card: unknown): Array<{ behaviors?: Array<{ value?: Json 
 test("resumeCard: button ops ENCODE the session id so colons survive card-action splitting", () => {
 	const card = resumeCard(
 		[
-			{ id: "lark-voice:dm:oc_x:nonce1:0", createdAt: Date.now() - 60_000 },
+			{ id: "lark-plus:dm:oc_x:nonce1:0", createdAt: Date.now() - 60_000 },
 			{ id: "7c9e067f-abc", createdAt: Date.now() - 3_600_000 },
 		],
 		undefined,
@@ -226,7 +228,7 @@ test("resumeCard: button ops ENCODE the session id so colons survive card-action
 		(b) => (b.behaviors?.[0]?.value as { op?: string })?.op ?? "",
 	);
 	assert.equal(ops.length, 2);
-	assert.equal(ops[0], "resume:lark-voice~1dm~1oc_x~1nonce1~10".replaceAll("~1", "%3A"));
+	assert.equal(ops[0], "resume:lark-plus~1dm~1oc_x~1nonce1~10".replaceAll("~1", "%3A"));
 	assert.equal(ops[1], "resume:7c9e067f-abc");
 });
 
@@ -259,3 +261,33 @@ test("resumeCard: relative times, titles, current-session row disabled, empty st
 	const empty = resumeCard([], undefined, { now: () => now });
 	assert.match(JSON.stringify(empty), /暂无历史会话/);
 });
+
+test("commandPanelButtons: one bare-op button per command (a tap == typing it)", () => {
+	const buttons = commandPanelButtons() as Array<{
+		text?: { content?: string };
+		behaviors?: Array<{ value?: { op?: string } }>;
+	}>;
+	assert.deepEqual(
+		buttons.map((b) => b.behaviors?.[0]?.value?.op),
+		["status", "new", "sessions", "stop", "mode", "permission", "model", "doctor", "lark-config", "help"],
+	);
+	// The card-action dispatcher forwards unknown ops to the bridge handler, so
+	// the panel needs no "cmd:" prefix and no Feishu-side menu configuration.
+	assert.ok(buttons.every((b) => typeof b.text?.content === "string" && b.text.content !== ""));
+});
+
+test("sessionStatusBlock: answers 'which session am I in'", () => {
+	const text = sessionStatusBlock({
+		sessionId: "lark-plus-dm-oc_x-nonce-0",
+		title: "测试会话",
+		workspace: "C:\\ws",
+		preset: "ptc",
+		model: "deepseek-account/deepseek-flash",
+	});
+	assert.match(text, /当前会话/);
+	assert.match(text, /lark-plus-dm-oc_x-nonce-0/);
+	assert.match(text, /测试会话/);
+	assert.match(text, /\/sessions/);
+	assert.match(text, /\/new/);
+});
+

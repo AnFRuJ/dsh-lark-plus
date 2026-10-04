@@ -1,4 +1,4 @@
-// One-click auth (ADR/spec §4.1 /lark-voice setup): scan a QR to create the Feishu
+// One-click auth (ADR/spec §4.1 /lark setup): scan a QR to create the Feishu
 // app via lark.registerApp (from @larksuiteoapi/node-sdk), with addons that
 // explicitly subscribe im.message.receive_v1 (the pi bridge's hard-won lesson:
 // registerApp defaults do NOT subscribe message events) + group/emoji scopes.
@@ -96,7 +96,7 @@ export function createAuthSetup(deps: AuthSetupDeps): AuthSetup {
 		async run(opts) {
 			opts.onStatusChange?.("创建应用中…");
 			const created = await deps.registerApp({
-				source: "dsh-lark-voice",
+				source: "dsh-lark-plus",
 				addons: buildSetupAddons(),
 				onQRCodeReady: (info) => opts.onQRCodeReady(info),
 				onStatusChange: (info) => opts.onStatusChange?.(info.status ?? "…"),
@@ -156,7 +156,7 @@ async function postForm(
 			headers: {
 				"Content-Type": "application/x-www-form-urlencoded",
 				Accept: "application/json",
-				"User-Agent": "dsh-lark-voice (device-code client)",
+				"User-Agent": "dsh-lark-plus (device-code client)",
 			},
 			body: new URLSearchParams(params).toString(),
 			signal,
@@ -308,6 +308,6 @@ export function registerAppWithFetch(): RegisterAppFn {
 			}
 			await sleep(interval, signal);
 		}
-		throw new Error("注册轮询超时（二维码已过期），请重新运行 /lark-voice setup");
+		throw new Error("注册轮询超时（二维码已过期），请重新运行 /lark setup");
 	};
 }

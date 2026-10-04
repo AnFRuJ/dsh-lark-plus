@@ -1,4 +1,4 @@
-// Build config for dsh-lark-voice (tsdown / rolldown).
+// Build config for dsh-lark-plus (tsdown / rolldown).
 // Host half: bundle src/index.ts → dist/index.js (ESM, node), keeping
 // @deepseek-ai/* (provided by the harness host at runtime), the Lark SDK and
 // node builtins external.
@@ -38,7 +38,7 @@ export default defineConfig([
 		external: [/^@deepseek-ai\//, "react"],
 		outputOptions: {
 			entryFileNames: "client.js",
-			banner: `window.__ModuleLoader__.load({ id: "dsh-lark-voice", factory: (require) => {`,
+			banner: `window.__ModuleLoader__.load({ id: "dsh-lark-plus", factory: (require) => {`,
 			intro: "var module = { exports: {} }; var exports = module.exports;",
 			footer: "return module.exports; } });",
 		},

@@ -1,6 +1,6 @@
 // Smoke test: apply() assembles the full plugin against a minimal fake Cordis
 // ctx (tools/commands/services) and the ctx.effect disposer tears it down
-// cleanly. Uses a temp DSH_LARK_VOICE_HOME so no user state is touched.
+// cleanly. Uses a temp DSH_LARK_PLUS_HOME so no user state is touched.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -50,12 +50,12 @@ function fakeCtx() {
 
 test("smoke: apply() registers tools/commands and effect disposer runs cleanly", async () => {
 	const home = mkdtempSync(join(tmpdir(), "dsh-lark-smoke-"));
-	process.env.DSH_LARK_VOICE_HOME = home;
+	process.env.DSH_LARK_PLUS_HOME = home;
 	const { ctx, tools, commands, effects } = fakeCtx();
 	const before = stateDir();
 	assert.ok(
 		before.includes("dsh-lark-smoke-"),
-		"state dir honors DSH_LARK_VOICE_HOME",
+		"state dir honors DSH_LARK_PLUS_HOME",
 	);
 
 	apply(ctx as never, ctx.config);
@@ -64,12 +64,12 @@ test("smoke: apply() registers tools/commands and effect disposer runs cleanly",
 	assert.ok(toolNames.includes("lark_config_get"), "config tool registered");
 	const cmdNames = commands.map((c) => c.name);
 	assert.ok(
-		cmdNames.includes("lark-voice"),
-		"single /lark-voice dispatcher command registered",
+		cmdNames.includes("lark-plus"),
+		"single /lark dispatcher command registered",
 	);
 	assert.ok(
-		!cmdNames.includes("lark-voice-status"),
-		"no flat lark-voice-status (subcommand form /lark-voice status)",
+		!cmdNames.includes("lark-plus-status"),
+		"no flat lark-plus-status (subcommand form /lark status)",
 	);
 
 	assert.equal(effects.length, 1, "one effect registered");
@@ -77,7 +77,7 @@ test("smoke: apply() registers tools/commands and effect disposer runs cleanly",
 	const teardown = disposer();
 	assert.equal(typeof teardown, "function", "effect returns disposer");
 	await teardown(); // must not throw
-	delete process.env.DSH_LARK_VOICE_HOME;
+	delete process.env.DSH_LARK_PLUS_HOME;
 });
 
 test("smoke: disabled config skips registration", () => {

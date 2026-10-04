@@ -13,8 +13,9 @@
 //
 // Harness-agnostic: the service is injected as a narrow structural interface.
 
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { zstdDecompressSync } from "node:zlib";
 
 /** Header-like row of the DSH sessionPersistence service (structural slice). */
 export interface SessionHeaderLike {
@@ -44,6 +45,77 @@ export interface PersistenceListSource {
 	readFrom?(id: string, fromSeq: number): Promise<{ meta?: unknown; events?: readonly unknown[] } | undefined>;
 }
 
+
+/** Newest session-log file in one session directory, or undefined.
+ *
+ * DSH renamed the log to session.v4.jsonl.zstd; matching only the old
+ * "session.jsonl.zstd" name made every scan-sourced listing empty (the GUI
+ * showed sessions but /resume answered "该工作区暂无历史会话日志"). */
+export function sessionLogPath(sessionDir: string): string | undefined {
+	let names: string[];
+	try {
+		names = readdirSync(sessionDir);
+	} catch {
+		return undefined;
+	}
+	let best: string | undefined;
+	let bestMtime = -1;
+	for (const entry of names) {
+		if (!/^session(\.[A-Za-z0-9]+)?\.jsonl(\.zstd)?$/.test(entry)) continue;
+		let mtime: number;
+		try {
+			mtime = statSync(join(sessionDir, entry)).mtimeMs;
+		} catch {
+			continue;
+		}
+		if (mtime > bestMtime) {
+			bestMtime = mtime;
+			best = join(sessionDir, entry);
+		}
+	}
+	return best;
+}
+
+/** Read the session's own title straight out of its (zstd-framed) log, so a
+ *  filesystem-scan listing can show real titles instead of "会话". */
+export function titleFromSessionLog(logPath: string): string | undefined {
+	try {
+		const raw = readFileSync(logPath);
+		const magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+		const offsets: number[] = [];
+		let at = raw.indexOf(magic);
+		if (at < 0) return undefined;
+		while (at >= 0) {
+			offsets.push(at);
+			at = raw.indexOf(magic, at + 4);
+		}
+		let text = "";
+		for (let i = 0; i < offsets.length; i += 1) {
+			const start = offsets[i] ?? 0;
+			const end = i + 1 < offsets.length ? (offsets[i + 1] ?? raw.length) : raw.length;
+			try {
+				text += zstdDecompressSync(raw.subarray(start, end)).toString("utf8");
+			} catch {
+				// a damaged frame only costs its own records
+			}
+		}
+		let title: string | undefined;
+		for (const line of text.split("\n")) {
+			if (!line.includes("session/title")) continue;
+			try {
+				const record = JSON.parse(line) as { type?: string; data?: { title?: string } };
+				if (record.type !== "session/title") continue;
+				const value = record.data?.title?.trim();
+				if (value) title = value.slice(0, 36);
+			} catch {
+				// ignore malformed lines
+			}
+		}
+		return title;
+	} catch {
+		return undefined;
+	}
+}
 
 export interface ListWorkspaceSessionsDeps {
 	/** DSH sessions root — <DSH_HOME>/sessions. */
@@ -175,7 +247,8 @@ export async function listWorkspaceSessions(
 		const dir = join(deps.sessionsRoot, projectKeyOf(deps.cwd));
 		if (existsSync(dir)) {
 			for (const name of readdirSync(dir)) {
-				const log = join(dir, name, "session.jsonl.zstd");
+				const log = sessionLogPath(join(dir, name));
+				if (log === undefined) continue; // no materialized log — not resumable
 				let mtime: number;
 				try {
 					mtime = statSync(log).mtimeMs;
@@ -184,7 +257,7 @@ export async function listWorkspaceSessions(
 				}
 				const id = decodeSessionDirName(name);
 				if (exclude.has(id)) continue;
-				const title = deps.titleFor?.(id);
+				const title = deps.titleFor?.(id) ?? titleFromSessionLog(log);
 				rows.push({ id, createdAt: mtime, ...(title ? { title } : {}), source: "scan" });
 			}
 			rows.sort((a, b) => b.createdAt - a.createdAt);

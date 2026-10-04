@@ -28,7 +28,7 @@ const assetsReady = modelReady(resolveModelDir()) && Boolean(resolveFfmpeg());
 test("voice e2e: audio event reaches the agent as text, clip kept on disk", async (t) => {
 	if (!assetsReady) return t.skip("needs the SenseVoice model + ffmpeg");
 
-	const inboundDir = mkdtempSync(join(tmpdir(), "lark-voice-e2e-"));
+	const inboundDir = mkdtempSync(join(tmpdir(), "lark-plus-e2e-"));
 	const ogg = readFileSync(oggPath);
 	// What the agent receives, captured at the backend seam.
 	const received: Array<{ key: string; text: string }> = [];

@@ -15,6 +15,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writ
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
+import { readWavSamples } from "./wav.ts";
+
 /** 16 kHz mono is what SenseVoice expects. */
 export const TARGET_SAMPLE_RATE = 16_000;
 
@@ -140,16 +142,9 @@ interface StreamLike {
 let recognizer: RecognizerLike | undefined;
 let recognizerDir: string | undefined;
 let loading: Promise<RecognizerLike> | undefined;
-let addon: { readWaveFromBinary: (b: Uint8Array) => { samples: Float32Array; sampleRate: number } } | undefined;
 
 function loadSherpa(): { OfflineRecognizer: new (cfg: unknown) => RecognizerLike } {
 	return require_("sherpa-onnx-node/non-streaming-asr.js") as { OfflineRecognizer: new (cfg: unknown) => RecognizerLike };
-}
-
-function loadAddon(): NonNullable<typeof addon> {
-	// The package root deliberately re-exports only readWave/writeWave; the
-	// binary-in/binary-out decoder lives on the addon module itself.
-	return require_("sherpa-onnx-node/addon.js") as NonNullable<typeof addon>;
 }
 
 export function buildRecognizerConfig(dir: string): unknown {
@@ -219,8 +214,10 @@ export async function transcribeWavBuffer(
 	try {
 		releaseRecognizerIfStale(dir);
 		const rec = await ensureRecognizer(dir);
-		addon ??= loadAddon();
-		const wave = addon.readWaveFromBinary(wav);
+		// Pure-JS decode on purpose: the native addon decoders (readWaveFromBinary
+		// and readWave) need external buffers, which Electron 44 / Node 24 refuse —
+		// that was the "External buffers are not allowed" 400. See src/voice/wav.ts.
+		const wave = readWavSamples(wav, TARGET_SAMPLE_RATE);
 		let samples = wave.samples;
 		if (wave.sampleRate !== TARGET_SAMPLE_RATE) {
 			const ratio = TARGET_SAMPLE_RATE / wave.sampleRate;

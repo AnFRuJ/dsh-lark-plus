@@ -111,7 +111,7 @@ test("auth-setup: a partial payload still persists what it has", async () => {
 	});
 });
 
-test("auth-setup: detectDomain maps tenant_brand to feishu/lark-voice", () => {
+test("auth-setup: detectDomain maps tenant_brand to feishu/lark", () => {
 	assert.equal(detectDomain(undefined), "feishu");
 	assert.equal(detectDomain({ tenant_brand: "feishu" }), "feishu");
 	assert.equal(detectDomain({ tenant_brand: "lark" }), "lark");
@@ -247,7 +247,7 @@ test("auth-setup: registerAppWithFetch drives begin → QR → poll → creds", 
 		let qr: QRCodeInfo | undefined;
 		const statuses: string[] = [];
 		const created = await registerApp({
-			source: "dsh-lark-voice",
+			source: "dsh-lark-plus",
 			addons: buildSetupAddons(),
 			onQRCodeReady: (info) => {
 				qr = info;
@@ -262,7 +262,7 @@ test("auth-setup: registerAppWithFetch drives begin → QR → poll → creds", 
 		);
 		assert.ok(qr.url.includes("from=sdk"), "from=sdk");
 		assert.ok(
-			qr.url.includes("source=node-sdk%2Fdsh-lark-voice") ||
+			qr.url.includes("source=node-sdk%2Fdsh-lark-plus") ||
 				qr.url.includes("source="),
 			"source param",
 		);
@@ -307,7 +307,7 @@ test("auth-setup: registerAppWithFetch aborts via signal", async () => {
 		const registerApp = registerAppWithFetch();
 		await assert.rejects(
 			registerApp({
-				source: "dsh-lark-voice",
+				source: "dsh-lark-plus",
 				onQRCodeReady: () => {},
 				signal: ac.signal,
 			}),

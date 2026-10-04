@@ -1,4 +1,4 @@
-// dsh-lark-voice — Cordis bundle plugin entry (thin assembly layer, spec §3).
+// dsh-lark-plus — Cordis bundle plugin entry (thin assembly layer, spec §3).
 // Registers:
 //   - bridge lifecycle (ctx.effect disposer → clean teardown on unload)
 //   - /lark-* commands (ctx.commands)
@@ -68,6 +68,9 @@ import {
 	permissionCard,
 	questionCard,
 	resumeCard,
+	commandPanelButtons,
+	commandPanelCard,
+	sessionStatusBlock,
 	withButtons,
 	button,
 	AGENT_PRESETS,
@@ -84,6 +87,7 @@ import { createTaskCardSyncer, type TaskCardSyncer } from "./outbound/task-card-
 
 
 import { createAuthSetup, registerAppWithFetch } from "./host/auth-setup.ts";
+import { voiceAudioRoute } from "./host/voice-audio-route.ts";
 import {
 	resolveCredentials,
 	persistCredentials,
@@ -110,7 +114,7 @@ import type { FeishuInboundMessage } from "./common/types.ts";
 import { createVoiceService } from "./voice/service.ts";
 import { transcribeWavBuffer } from "./voice/transcribe.ts";
 
-export const name = "dsh-lark-voice";
+export const name = "dsh-lark-plus";
 
 // Test surface: the inbound-audio branch is the behaviour this fork adds, and
 // it has to be reachable from the BUILT artefact (not just the sources) so a
@@ -167,11 +171,11 @@ function voiceOptionsFrom(cfg: LarkLinkConfig | undefined): import("./voice/tran
 	};
 }
 
-/** Bridge state directory (<DSH_HOME>/lark-voice, overridable). */
+/** Bridge state directory (<DSH_HOME>/lark, overridable). */
 export function stateDir(): string {
 	return (
-		process.env.DSH_LARK_VOICE_HOME ??
-		join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "lark-voice")
+		process.env.DSH_LARK_PLUS_HOME ??
+		join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "lark-plus")
 	);
 }
 
@@ -181,7 +185,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 
 	const dir = stateDir();
 	mkdirSync(dir, { recursive: true });
-	const logger: Logger = createLogger("lark-voice");
+	const logger: Logger = createLogger("lark-plus");
 
 	// ---- config / status / stores -------------------------------------------
 	const configStore = createConfigStore(dir, {
@@ -288,7 +292,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	try {
 		backend = createDshAdapter({
 			ctx,
-			sessionPrefix: "lark-voice",
+			sessionPrefix: "lark-plus",
 			runNonce,
 			logger,
 			// Per-key resolution: conversation override ?? bridge default.
@@ -317,6 +321,35 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			// GH #8: bridge sessions carry the bridge's permission preset at
 			// creation/resume — the host-wide default is never modified.
 			permissionMode: () => getCfg().permissionMode,
+			// A restart that cannot resume the persisted session used to open a
+			// fresh one SILENTLY, which read as "sometimes it continues, sometimes
+			// it starts over". Now the chat is told, with the reason.
+			onResumeFallback: (key, lostSessionId, cause) => {
+				try {
+					const reason = cause instanceof Error ? cause.message : String(cause);
+					logger.warn("session resume fell back for " + key + ": " + reason);
+					const route = routeStore.get(key);
+					if (route === undefined || !route.chatId) return;
+					const queued: unknown = outbox.enqueue({
+							dedupeKey: "bridge:session-fallback:" + Date.now().toString(36),
+							laneKey: key,
+							route: { sessionKey: key, chatId: route.chatId, chatType: route.chatType },
+							kind: "command-reply",
+							payload: {
+								kind: "text",
+								text: [
+									"⚠️ **没能接续上次的会话**，已新开一个空会话。",
+									"- 原会话：" + "`" + lostSessionId + "`",
+									"- 原因：" + reason.slice(0, 300),
+									"- 想回去：发 `/sessions` 点一下原会话，或 `/resume <序号>`；历史内容都还在。",
+								].join("\n"),
+							},
+						});
+					if (queued instanceof Promise) void queued.catch(() => undefined);
+				} catch (err) {
+					logger.warn("resume fallback notice failed: " + String(err));
+				}
+			},
 		});
 	} catch (err) {
 		logger.warn(
@@ -351,7 +384,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		id.length <= 8 ? "****" : `${id.slice(0, 6)}…${id.slice(-4)}`;
 
 	// ---- webui QR surface ---------------------------------------------------
-	// /lark-voice setup renders its QR into a PNG served at /plugins/lark-voice/qr so
+	// /lark setup renders its QR into a PNG served at /plugins/lark-plus/qr so
 	// the Web GUI (sidebar panel) can show a scannable image directly — the GUI
 	// markdown image sanitizer only allows http(s), and a plugin can't push to
 	// the client, so a host-served local image is the reliable channel.
@@ -372,7 +405,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			() =>
 				webServer.register({
 					kind: "exact",
-					path: "/plugins/lark-voice/qr",
+					path: "/plugins/lark-plus/qr",
 					handler: (_req, res) => {
 						const r = res as {
 							writeHead(
@@ -389,17 +422,17 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 							r.end(activeQr.png);
 						} else {
 							r.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-							r.end("no active lark-voice setup qr (run /lark-voice setup)");
+							r.end("no active lark-plus setup qr (run /lark setup)");
 						}
 					},
 				}),
-			"lark-voice: webui qr route",
+			"lark-plus: webui qr route",
 		);
 		ctx.effect(
 			() =>
 				webServer.register({
 					kind: "exact",
-					path: "/plugins/lark-voice/status",
+					path: "/plugins/lark-plus/status",
 					handler: async (_req, res) => {
 						const r = res as {
 							writeHead(s: number, h: Record<string, string>): unknown;
@@ -415,7 +448,28 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 						r.end(JSON.stringify({ ...status.get(), configured }));
 					},
 				}),
-			"lark-voice: webui status route",
+			"lark-plus: webui status route",
+		);
+		// Read-only playback for the Web GUI (src/client: an <audio> under each
+		// voice message). Bytes are the clip the bridge already persisted, so the
+		// user can replay a voice note without going back to Feishu.
+		ctx.effect(
+			() =>
+				webServer.register({
+					kind: "prefix",
+					path: "/plugins/lark-plus/audio",
+					handler: (req, res) =>
+						voiceAudioRoute(
+							req as never,
+							res as never,
+							join(
+								getCfg().attachments.dir.trim() ||
+									join(tmpdir(), "dsh-lark-plus", "inbound"),
+								"media",
+							),
+						),
+				}),
+			"lark-plus: voice playback route",
 		);
 		// Local transcription endpoint. Same path as dsh-voice-local uses, so any
 		// existing tooling (and this plugin's own docs) point at the same place.
@@ -487,7 +541,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 						json(404, { ok: false, error: { code: "not-found", message: "未知端点" } });
 					},
 				}),
-			"lark-voice: local transcribe route",
+			"lark-plus: local transcribe route",
 		);
 	}
 
@@ -1030,14 +1084,57 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		msg: FeishuInboundMessage,
 	): Promise<boolean> => {
 		switch (name) {
-			case "status":
-				await durableReply(name, 
+			case "status": {
+				const statusKey = bridge.conversationKeyFor(msg);
+				const statusSessionId =
+					bridge.backend?.get(statusKey)?.sessionId ??
+					convCfg.get(statusKey).activeSessionId;
+				let statusTitle: string | undefined;
+				try {
+					const statusSessions = (
+						ctx as unknown as { get?(name: string): unknown }
+					).get?.("sessions") as { get?(id: string): unknown } | undefined;
+					const statusTitles = (
+						ctx as unknown as { get?(name: string): unknown }
+					).get?.("sessionTitle") as
+						| { get?(session: unknown): { title?: string } | undefined }
+						| undefined;
+					const statusLive =
+						statusSessionId === undefined
+							? undefined
+							: statusSessions?.get?.(statusSessionId);
+					if (statusLive && statusTitles?.get) {
+						statusTitle = statusTitles.get(statusLive)?.title;
+					}
+				} catch {
+					// the title is decoration — never fail /status for it
+				}
+				const statusModel = liveModelFor(statusKey);
+				await durableReply(
+					name,
 					msg,
 					formatStatusLine(status.get()) +
 						"\n\n" +
-						statusDetailLines(status.get()).join("\n"),
+						statusDetailLines(status.get()).join("\n") +
+						"\n\n" +
+						sessionStatusBlock({
+							sessionId: statusSessionId,
+							title: statusTitle,
+							workspace:
+								convCfg.get(statusKey).workspaceRoot ??
+								(getCfg().workspaceRoot || process.cwd()),
+							preset: normalizeAgentPreset(
+								convCfg.get(statusKey).preset ??
+									(getCfg().agentPreset || "ptc"),
+							),
+							model:
+								statusModel.provider && statusModel.model
+									? statusModel.provider + "/" + statusModel.model
+									: undefined,
+						}),
 				);
 				return true;
+			}
 			case "feishu-config":
 			case "lark-config": {
 				// /lark-config key=value — hot reload (no value shows status).
@@ -1116,7 +1213,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 							? await buildSessionExportZip(sessionId, diag.text, diag.issueMd)
 							: undefined;
 						if (zipBuf) {
-							const fileName = `lark-voice-doctor-${Date.now()}.zip`;
+							const fileName = `lark-plus-doctor-${Date.now()}.zip`;
 							const uploadKey = extractUploadKey(
 								await client.uploadFile({
 									file_type: "file",
@@ -1131,9 +1228,9 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 							}
 						}
 						// No session log or zip failed — send the report as a file.
-						const fileName = `lark-voice-doctor-${Date.now()}.md`;
+						const fileName = `lark-plus-doctor-${Date.now()}.md`;
 						const buf = Buffer.from(
-							`# dsh-lark-voice 诊断包\n\n${diag.text}\n\n${diag.issueMd}\n`,
+							`# dsh-lark-plus 诊断包\n\n${diag.text}\n\n${diag.issueMd}\n`,
 							"utf8",
 						);
 						const uploadKey = extractUploadKey(
@@ -1157,20 +1254,17 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				await durableReply(name, msg, diag.text);
 				return true;
 			}
-			case "sessions": {
-				// List live bridge sessions (pi f752ece /sessions 决策).
-				const keys = bridge.conversations?.keys() ?? [];
-				const lines = keys.length
-					? keys.map((k) => `- ${k}`)
-					: ["（无活跃会话）"];
-				await durableReply(name, 
-					msg,
-					`**会话列表 (${keys.length})**\n\n` + lines.join("\n"),
-				);
-				return true;
-			}
+			case "sessions":
+				// Same card as /resume: this workspace's historical sessions with the
+				// current one marked. The old body listed internal conversation keys
+				// ("dm:oc_…"), which told the user nothing.
+				return bridgeHandler("resume", "", msg);
 			case "help":
-				await durableReply(name, msg, helpCard());
+				// The textual help list, plus the same tap-to-run buttons as /menu.
+				await durableReply(name, msg, withButtons(helpCard(), commandPanelButtons()));
+				return true;
+			case "menu":
+				await durableReply(name, msg, commandPanelCard());
 				return true;
 			case "workspace": {
 				const arg = _rawInput.trim();
@@ -1329,7 +1423,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 					return true;
 				}
 
-				// Card buttons pass the id URI-ENCODED (lark-voice ids contain
+				// Card buttons pass the id URI-ENCODED (lark-plus ids contain
 				// colons which the card-action op splitter would otherwise
 				// cut at the first one); a typed /resume <id> may be raw, a
 				// prefix, or a 1-based index matching the card numbering.
@@ -1728,7 +1822,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				return true;
 			}
 			case "lark": {
-				// Feishu-side /lark-voice subcommands — same executor as the DSH command.
+				// Feishu-side /lark subcommands — same executor as the DSH command.
 				const sub = _rawInput.trim().split(/\s+/)[0] ?? "";
 				await durableReply(name, msg, await runLarkSubcommand(sub.toLowerCase()));
 				return true;
@@ -2008,7 +2102,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		// (startup-time setting; takes effect after a reload).
 		inboundDir:
 			getCfg().attachments.dir.trim() ||
-			join(tmpdir(), "dsh-lark-voice", "inbound"),
+			join(tmpdir(), "dsh-lark-plus", "inbound"),
 		// The service is always wired (it persists the raw clip); the flag only
 		// controls whether we also transcribe. voice.enabled=false therefore keeps
 		// every voice message as an audio file with no recognized text.
@@ -2154,11 +2248,11 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		if (lifecycleStarted) return;
 		// Resolve credentials + build the lark client before wiring the transport.
 		// Missing credentials is NOT fatal (the plugin must still load) — bail with
-		// a clear blocker so /lark-voice start reports it and the plugin survives.
+		// a clear blocker so /lark start reports it and the plugin survives.
 		const ref = getCfg().credentialRef;
 		const creds = await resolveCredentials(credStore, ref);
 		if (!creds) {
-			startBlocker = `未配置飞书凭据（ref=${ref}）。请先运行 /lark-voice setup 扫码，或设置 DSH_LARK_APP_ID/DSH_LARK_APP_SECRET 后再 /lark-voice setup。`;
+			startBlocker = `未配置飞书凭据（ref=${ref}）。请先运行 /lark setup 扫码，或设置 DSH_LARK_APP_ID/DSH_LARK_APP_SECRET 后再 /lark setup。`;
 			logger.warn(startBlocker);
 			return;
 		}
@@ -2360,7 +2454,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			},
 			async execute(args, exec) {
 				// Resolve the requesting conversation FIRST: exec.agent.id is the
-				// bridge session id (lark-voice:dm:ou_x:nonce). The session id
+				// bridge session id (lark-plus:dm:ou_x:nonce). The session id
 				// carries the per-run nonce suffix while route keys do not —
 				// prefer the backend reverse map, else strip the trailing nonce.
 				const sessionId = (exec as { agent?: { id?: string } }).agent?.id ?? "";
@@ -2382,7 +2476,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 					workspaceRoot,
 				);
 				if (!inWorkspace) return "拒绝: 路径不在工作区内";
-				const prefix = "lark-voice:";
+				const prefix = "lark-plus:";
 				const backendKey = bridge.backend?.keyForSessionId?.(sessionId);
 				const key =
 					backendKey ??
@@ -2466,7 +2560,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			// input hint is REQUIRED for the DSH web composer to execute a
 			// command with arguments: ui-commands' matchEnter returns a claim
 			// only when desc.input is defined, otherwise a non-bare slash line
-			// (/lark-voice setup) falls through to the agent as a plain message.
+			// (/lark setup) falls through to the agent as a plain message.
 			...(inputHint !== undefined ? { input: { hint: inputHint } } : {}),
 			handler: async (inv: { rawInput?: string }) => ({
 				kind: "success",
@@ -2474,8 +2568,8 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			}),
 		});
 	};
-	// Shared /lark-voice subcommand executor — used by the DSH command (/lark-voice x) AND
-	// the Feishu-side route (/lark-voice x in chat). startBridge/stopBridge/runSetup
+	// Shared /lark subcommand executor — used by the DSH command (/lark x) AND
+	// the Feishu-side route (/lark x in chat). startBridge/stopBridge/runSetup
 	// are resolved at call time (all initialized before any message arrives).
 	const runLarkSubcommand = async (sub: string): Promise<string> => {
 		switch (sub) {
@@ -2500,15 +2594,15 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			case "uninstall-clean":
 				return await runUninstallClean();
 			default:
-				return "Lark Link 用法：/lark-voice setup | start | stop | restart | status | uninstall-clean";
+				return "Lark Link 用法：/lark setup | start | stop | restart | status | uninstall-clean";
 		}
 	};
-	// Single /lark-voice command with subcommand dispatch (DSH command names
+	// Single /lark command with subcommand dispatch (DSH command names
 	// can't contain spaces — the space separates name from input — so
-	// `/lark-voice setup` is command 'lark-voice' + input 'setup').
+	// `/lark setup` is command 'lark-plus' + input 'setup').
 	registerCmd(
-		"lark-voice",
-		"Feishu/Lark bridge — usage: /lark-voice setup|start|stop|restart|status|uninstall-clean",
+		"lark-plus",
+		"Feishu/Lark bridge — usage: /lark setup|start|stop|restart|status|uninstall-clean",
 		async (rawInput) =>
 			runLarkSubcommand((rawInput.trim().split(/\s+/)[0] ?? "").toLowerCase()),
 		"setup|start|stop|restart|status|uninstall-clean",
@@ -2519,7 +2613,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	 * at <DSH_HOME>/sessions/<workspace-dir>/<encoded-session-id>/session.jsonl.zstd
 	 * where ":" encodes as "~003A" — scan every workspace dir for the match.
 	 */
-	/** Scan ~/.dsh/sessions for the most recently written lark-voice session id. */
+	/** Scan ~/.dsh/sessions for the most recently written lark-plus session id. */
 	const findLatestLarkSessionId = (): string | undefined => {
 		const sessionsRoot = join(
 			process.env.DSH_HOME ?? join(homedir(), ".dsh"),
@@ -2536,7 +2630,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				continue;
 			}
 			for (const name of entries) {
-				if (!name.includes("lark-voice")) continue;
+				if (!name.includes("lark-plus")) continue;
 				const sessionDir = join(wsPath, name);
 				const zstd = join(sessionDir, "session.jsonl.zstd");
 				if (!existsSync(zstd)) continue;
@@ -2683,7 +2777,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			files.push({
 				name: "ISSUE.md",
 				data: Buffer.from(
-					`# dsh-lark-voice 诊断包\n\n${diagText}\n\n${issueMd}\n`,
+					`# dsh-lark-plus 诊断包\n\n${diagText}\n\n${issueMd}\n`,
 					"utf8",
 				),
 			});
@@ -2738,7 +2832,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				appSecret: envSecret,
 				domain: envDomain,
 			});
-			return `凭据已保存（env 手动，appId=${maskId(envAppId)}，domain=${envDomain}）。运行 /lark-voice start 启动。`;
+			return `凭据已保存（env 手动，appId=${maskId(envAppId)}，domain=${envDomain}）。运行 /lark start 启动。`;
 		}
 		// QR channel — NON-BLOCKING. registerApp only resolves AFTER the user
 		// scans; awaiting it would hang the GUI ("执行中…") and the QR was only
@@ -2805,7 +2899,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 			await new Promise((r) => setTimeout(r, 200));
 		}
 		if (!qrInfo) {
-			return "扫码流程未在 30s 内就绪。可改用手动通道：设 DSH_LARK_APP_ID + DSH_LARK_APP_SECRET 后再 /lark-voice setup。";
+			return "扫码流程未在 30s 内就绪。可改用手动通道：设 DSH_LARK_APP_ID + DSH_LARK_APP_SECRET 后再 /lark setup。";
 		}
 		console.log(
 			`飞书授权二维码链接: ${qrInfo.url}（${qrInfo.expireIn} 秒后过期）`,
@@ -2813,7 +2907,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		return [
 			"📱 飞书授权二维码已生成 —— 见左侧 🪶 Lark 面板（或终端），手机飞书扫码确认。",
 			"",
-			`二维码 ${qrInfo.expireIn} 秒后过期。扫码后凭据在后台写入，运行 /lark-voice start 启动。`,
+			`二维码 ${qrInfo.expireIn} 秒后过期。扫码后凭据在后台写入，运行 /lark start 启动。`,
 			`备用链接（手机浏览器打开）：${qrInfo.url}`,
 			"看不到二维码？终端也打印了；或用 DSH_LARK_APP_ID/SECRET 手动通道。",
 		].join("\n");
@@ -2848,7 +2942,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		} catch {
 			// best effort
 		}
-		return `已清除凭据（ref=${ref}）并清理状态目录 ${dir}。重新使用请运行 /lark-voice setup。`;
+		return `已清除凭据（ref=${ref}）并清理状态目录 ${dir}。重新使用请运行 /lark setup。`;
 	};
 
 	// ---- system prompt section ---------------------------------------------------
@@ -2878,7 +2972,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		const stopMediaSweeper = startMediaSweeper({
 			mediaDir: join(
 				getCfg().attachments.dir.trim() ||
-					join(tmpdir(), "dsh-lark-voice", "inbound"),
+					join(tmpdir(), "dsh-lark-plus", "inbound"),
 				"media",
 			),
 			retentionHours: () => getCfg().attachments.retentionHours,

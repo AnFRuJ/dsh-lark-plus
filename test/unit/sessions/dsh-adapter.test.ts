@@ -10,7 +10,7 @@ test("adapter: cwd/preset/modelSelection are resolved PER KEY (no cross-talk)", 
 	const selB = { provider: "p2", model: "m2" };
 	const backend = createDshAdapter({
 		ctx,
-		sessionPrefix: "lark-voice",
+		sessionPrefix: "lark-plus",
 		logger: silentLogger,
 		cwd: (key) => (key === "dm:ou_a" ? "/ws/a" : "/ws/default"),
 		preset: (key) => (key === "dm:ou_b" ? "minimal" : "ptc"),
@@ -58,7 +58,7 @@ test("adapter: historical agentPreset alias `code` is normalized to DSH `ptc` (G
 	};
 	const backend = createDshAdapter({
 		ctx: ctxOf(registry, undefined, agentPresets),
-		sessionPrefix: "lark-voice",
+		sessionPrefix: "lark-plus",
 		logger: silentLogger,
 		// Old configs / conversation overrides still store `code`.
 		preset: () => "code",
@@ -89,7 +89,7 @@ test("adapter: resumeAgent normalizes stored legacy preset `code` → `ptc`", as
 	};
 	const backend = createDshAdapter({
 		ctx: ctxOf(registry, undefined, agentPresets),
-		sessionPrefix: "lark-voice",
+		sessionPrefix: "lark-plus",
 		logger: silentLogger,
 	});
 
@@ -106,7 +106,7 @@ test("adapter: currentFor entries are LIVE objects — mutation switches the mod
 	const sel = { provider: "p1", model: "m1" };
 	const backend = createDshAdapter({
 		ctx: ctxOf(registry, undefined),
-		sessionPrefix: "lark-voice",
+		sessionPrefix: "lark-plus",
 		logger: silentLogger,
 		modelSelection: { currentFor: () => sel },
 	});
@@ -269,7 +269,7 @@ function mkBackend(
 ): DshSessionBackend {
 	return createDshAdapter({
 		ctx: ctx as Parameters<typeof createDshAdapter>[0]["ctx"],
-		sessionPrefix: "lark-voice",
+		sessionPrefix: "lark-plus",
 		logger: silentLogger,
 		modelSelection,
 		runNonce,
@@ -311,7 +311,7 @@ test("adapter: agents.create receives agentOptions + installModelSelection setup
 		"setup must be provided to wire installModelSelection",
 	);
 	assert.ok(
-		handle.agentId.includes("lark-voice:dm:ou_user_1"),
+		handle.agentId.includes("lark-plus-dm-ou_user_1"),
 		"session prefix applied",
 	);
 });
@@ -521,7 +521,8 @@ test("adapter: create collision falls back to resume existing session", async ()
 	const registry = fakeRegistry();
 	const ctx = ctxOf(registry, undefined);
 	const NONCE = "r2def456";
-	const collidedId = `lark-voice:dm:ou_user_1:${NONCE}:0`;
+	// Ids are path-safe now: DSH's per-record store rejects ':'.
+	const collidedId = `lark-plus-dm-ou_user_1-${NONCE}-0`;
 	// Pre-seed the persisted session in registry
 	registry.agents.set(collidedId, {
 		id: collidedId,
@@ -555,15 +556,31 @@ test("adapter: /new (rotate) mints a wholly fresh session id (new nonce)", async
 	// The fresh id must NOT reuse the old runNonce family — a `:<gen+1>` id
 	// can collide with a persisted log from an earlier run and fail the first
 	// turn ("already persisted at a different cwd (id collision)").
+	// <prefix>-<key>-<nonce>-<generation>
+	const familyOf = (id: string): string => id.slice(0, id.lastIndexOf("-"));
 	assert.notEqual(
-		second.sessionId.split(":")[3],
-		first.sessionId.split(":")[3],
+		familyOf(second.sessionId),
+		familyOf(first.sessionId),
 		"/new mints a new runNonce, not a generation bump",
 	);
 	assert.ok(
-		second.sessionId.endsWith(":0"),
+		second.sessionId.endsWith("-0"),
 		"fresh session starts at generation 0",
 	);
+});
+
+test("adapter: session ids stay path-safe for DSH's per-record stores", async () => {
+	const registry = fakeRegistry();
+	const backend = mkBackend(ctxOf(registry, undefined), undefined, "r9safe1");
+
+	const handle = await backend.ensureAgent("dm:ou_user_1");
+
+	// The session projection cache stores one document per session id
+	// (<DSH_HOME>/storages/session_projcache/sessions/<id>.json) and rejects any
+	// key outside [A-Za-z0-9_-] — a colon made every bridge session lose its
+	// cached title, so the GUI listed them as "未命名" after each restart.
+	assert.match(handle.sessionId, /^[A-Za-z0-9_-]+$/, "session id must be a path-safe key");
+	assert.ok(handle.sessionId.includes("dm-ou_user_1"), "the conversation key survives");
 });
 
 test("adapter: listPresets maps the live DSH roster (shipped + custom)", async () => {
@@ -673,7 +690,7 @@ test("adapter: resumeAgent calls agents.resume with the stored preset and tracks
 	};
 	const backend = createDshAdapter({
 		ctx: ctxOf(registry, undefined, agentPresets),
-		sessionPrefix: "lark-voice",
+		sessionPrefix: "lark-plus",
 		logger: silentLogger,
 		modelSelection: { currentFor: () => ({ provider: "p", model: "m" }) },
 	});
@@ -792,7 +809,7 @@ test("adapter: ensureAgent applies the bridge permissionMode to THIS session onl
 	} as unknown as Parameters<typeof createDshAdapter>[0]["ctx"];
 	const backend = createDshAdapter({
 		ctx,
-		sessionPrefix: "lark-voice",
+		sessionPrefix: "lark-plus",
 		logger: silentLogger,
 		permissionMode: () => "danger-full-access",
 	});
@@ -825,7 +842,7 @@ test("adapter: resumeAgent applies the bridge permissionMode to the resumed sess
 	} as unknown as Parameters<typeof createDshAdapter>[0]["ctx"];
 	const backend = createDshAdapter({
 		ctx,
-		sessionPrefix: "lark-voice",
+		sessionPrefix: "lark-plus",
 		logger: silentLogger,
 		permissionMode: () => "workspace-write",
 	});
@@ -838,7 +855,7 @@ test("adapter: missing permission services never break agent creation (GH #8 no-
 	const registry = fakeRegistry();
 	const backend = createDshAdapter({
 		ctx: ctxOf(registry, undefined),
-		sessionPrefix: "lark-voice",
+		sessionPrefix: "lark-plus",
 		logger: silentLogger,
 		permissionMode: () => "read-only",
 	});

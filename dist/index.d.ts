@@ -533,13 +533,13 @@ interface VoiceService {
   ready(): boolean;
   /** ffmpeg that will be used (undefined = not found). */
   ffmpeg(): string | undefined;
-  /** Human-readable one-liner for /lark-voice status. */
+  /** Human-readable one-liner for /lark status. */
   statusLine(): string;
   /** Live download progress. */
   download(): DownloadState;
   /** Start the model download in the background (resolves immediately). */
   startDownload(): void;
-  /** Await a full model download (used by /lark-voice download). */
+  /** Await a full model download (used by /lark download). */
   downloadNow(): Promise<DownloadState>;
   /**
    * Transcribe audio bytes received from Feishu.
@@ -622,7 +622,7 @@ interface BridgeContextRead {
 declare function resolveInboundAttachments(msg: FeishuInboundMessage, ctx: BridgeContextRead, inboundDir?: string, voice?: VoiceService, transcribe?: boolean): Promise<AttachmentInput[]>;
 //#endregion
 //#region src/index.d.ts
-declare const name = "dsh-lark-voice";
+declare const name = "dsh-lark-plus";
 declare const inject: string[];
 interface LarkLinkConfig {
   enabled?: boolean;
@@ -648,7 +648,7 @@ interface LarkLinkConfig {
     ffmpegTimeoutMs?: number;
   };
 }
-/** Bridge state directory (<DSH_HOME>/lark-voice, overridable). */
+/** Bridge state directory (<DSH_HOME>/lark, overridable). */
 declare function stateDir(): string;
 declare function apply(ctx: Context, rawConfig: unknown): void;
 //#endregion

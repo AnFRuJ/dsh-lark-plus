@@ -39,7 +39,7 @@ test("voice: audio message becomes text AND keeps the raw clip on disk", async (
 	if (!assetsReady) return t.skip("needs the SenseVoice model + ffmpeg");
 
 	const ogg = readFileSync(oggPath);
-	const inboundDir = mkdtempSync(join(tmpdir(), "lark-voice-att-"));
+	const inboundDir = mkdtempSync(join(tmpdir(), "lark-plus-att-"));
 	const voice = createVoiceService({ warn: () => {}, info: () => {} });
 	const downloads: string[] = [];
 	const ctx = {
@@ -81,7 +81,7 @@ test("voice: audio message becomes text AND keeps the raw clip on disk", async (
 });
 
 test("voice: transcription disabled still keeps the clip (no text)", async () => {
-	const inboundDir = mkdtempSync(join(tmpdir(), "lark-voice-off-"));
+	const inboundDir = mkdtempSync(join(tmpdir(), "lark-plus-off-"));
 	const ctx = {
 		logger,
 		transport: { async downloadResource() { return readFileSync(oggPath); } },

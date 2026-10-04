@@ -1,5 +1,5 @@
 // DiagnosticsService: one-click sanitized diagnostic bundle (`/doctor`, `/support` 旧名兼容,
-// `/lark-voice doctor`). Masks secrets, hashes ids, includes config (redacted),
+// `/lark doctor`). Masks secrets, hashes ids, includes config (redacted),
 // connection history, outbox stats, and a prefilled ISSUE.md. Harness-agnostic.
 
 import type { BridgeContextRead } from "./bridge-context.ts";
@@ -23,7 +23,7 @@ export function createDiagnosticsService(deps: DiagnosticsDeps): DiagnosticsServ
       const s = deps.ctx.status.get();
       const cfg = deps.ctx.cfg();
       const lines: string[] = [
-        "# dsh-lark-voice 诊断包",
+        "# dsh-lark-plus 诊断包",
         "",
         `生成时间: ${new Date().toISOString()}`,
         `桥状态: ${deps.ctx.started() ? "运行中" : "未启动"}`,
@@ -48,7 +48,7 @@ export function createDiagnosticsService(deps: DiagnosticsDeps): DiagnosticsServ
         "```",
         "",
         "## 环境",
-        "- dsh-lark-voice: 0.1.0",
+        "- dsh-lark-plus: 0.1.0",
         "- Node: " + process.version,
       ].join("\n");
       return { text: lines.join("\n"), issueMd };

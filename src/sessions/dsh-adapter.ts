@@ -36,6 +36,42 @@ function resolveAgentPreset(
 	);
 }
 
+/** Pending per-session projection checkpoints (one timer each, replaced). */
+const projectionCheckpoints = new Map<string, NodeJS.Timeout>();
+
+/**
+ * Durably checkpoint one session's projection (title, list metadata, …) shortly
+ * after its turn ends.
+ *
+ * WHY: DSH's session list reads COLD sessions' titles from the projection cache
+ * only. Bridge-owned sessions were never opened in the Web UI, so without this
+ * write the GUI showed them as "未命名" after every restart, while opening one
+ * (making it live) revealed the real title. The delay lets the async title
+ * generation land first; failures are swallowed — a missing cache row must
+ * never affect the conversation.
+ */
+function scheduleProjectionCheckpoint(ctx: unknown, session: unknown): void {
+	const id = (session as { id?: string } | undefined)?.id;
+	if (typeof id !== "string" || id === "") return;
+	const cache = (ctx as { get?: (name: string) => unknown } | undefined)?.get?.("sessionProjectionCache") as
+		| { write?: (session: unknown) => Promise<unknown> }
+		| undefined;
+	if (typeof cache?.write !== "function") return;
+	const previous = projectionCheckpoints.get(id);
+	if (previous !== undefined) clearTimeout(previous);
+	projectionCheckpoints.set(
+		id,
+		setTimeout(() => {
+			projectionCheckpoints.delete(id);
+			try {
+				void Promise.resolve(cache.write?.(session)).catch(() => undefined);
+			} catch {
+				// best-effort only
+			}
+		}, 2500),
+	);
+}
+
 export interface DshAdapterDeps {
 	ctx: Context;
 	/** Stable session-id prefix so created sessions are bridge-owned. */
@@ -52,6 +88,10 @@ export interface DshAdapterDeps {
 	/** Agent preset id for created sessions — per-key getter so /mode
 	 * hot-swaps ONE conversation without touching others. */
 	preset?: (key: string) => string;
+	/** Called when the persisted active session could NOT be resumed and a
+	 *  fresh one was created instead — the chat is told why, so a restart that
+	 *  silently opens a new session stops being a mystery. */
+	onResumeFallback?: (key: string, lostSessionId: string, cause: unknown) => void;
 	/**
 	 * LIVE model selection. currentFor(key) returns the mutable object the
 	 * agent for that conversation reads via installModelSelection on each
@@ -304,8 +344,13 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 	// Per-key generation: /new bumps it so the next agent gets a FRESH session
 	// id without colliding with the persisted log from the previous generation.
 	const generations = new Map<string, number>();
+	// Session ids must be PATH-SAFE: DSH's per-record JSON store (the session
+	// projection cache, ~/.dsh/storages/session_projcache/sessions/<id>.json)
+	// rejects any key outside [A-Za-z0-9_-] — a colon silently lost every
+	// bridge session its cached title, so the GUI listed them as "未命名"
+	// until the session was opened in the Web UI.
 	const bridgeKey = (key: string): string =>
-		`${deps.sessionPrefix}:${key}:${runNonce}:${generations.get(key) ?? 0}`;
+		`${deps.sessionPrefix}-${key.replace(/[^A-Za-z0-9_-]+/g, "-")}-${runNonce}-${generations.get(key) ?? 0}`;
 	// /resume: a pending resume target makes the NEXT ensureAgent load the
 	// persisted log via agents.resume instead of creating; the stored preset
 	// override pins the recomposition (resume must mount the world the
@@ -768,6 +813,11 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 					deps.logger?.warn(
 						`failed to resume active session "${activeId}" for ${key}: ${err instanceof Error ? err.message : String(err)} — falling back to create fresh session`,
 					);
+					try {
+						deps.onResumeFallback?.(key, activeId, err);
+					} catch {
+						// a failed notice must never break the fallback
+					}
 				}
 			}
 
@@ -1035,6 +1085,7 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 					if (final !== undefined) out.finalText = final;
 					lastAssistantText.delete(key);
 				}
+				if (out.type === "turn/end") scheduleProjectionCheckpoint(c, agent.session);
 				const set = listeners.get(key);
 				if (set) for (const fn of set) fn(out);
 			},

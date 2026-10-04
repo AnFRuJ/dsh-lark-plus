@@ -1,14 +1,14 @@
-// dsh-lark-voice client half (browser). Reuses the DSH Web GUI entirely
+// dsh-lark-plus client half (browser). Reuses the DSH Web GUI entirely
 // (spec §7). This client adds one surface — a sidebar footer action whose
 // popover is a small STATE MACHINE over (configured × connection):
 //   not-configured → show the setup QR
-//   configured + stopped/idle → "ready, run /lark-voice start"
+//   configured + stopped/idle → "ready, run /lark start"
 //   configured + connecting → "connecting…"
 //   configured + connected → "running" (stop/restart)
 //   configured + degraded/quarantined → "error"
-// State comes from the host /plugins/lark-voice/status route (JSON: connState,
+// State comes from the host /plugins/lark-plus/status route (JSON: connState,
 // outbox counters, configured). The QR is a host-served PNG at
-// /plugins/lark-voice/qr (the GUI markdown image sanitizer drops data: URLs,
+// /plugins/lark-plus/qr (the GUI markdown image sanitizer drops data: URLs,
 // and a plugin can't push over ctx.remote — so we poll a local image we own).
 //
 // Slot registration: `sidebar.footer.action` is a `list` slot (declared by
@@ -57,7 +57,31 @@ const portalToBody =
 		? (node: unknown) => reactDom.createPortal!(node, bodyEl)
 		: (node: unknown) => node;
 
-export const name = "dsh-lark-voice-client";
+/** Minimal DOM surface for the voice-player decorator: this bundle compiles
+ *  without lib.dom, so every node is described structurally here. */
+interface DomNode {
+	getAttribute(name: string): string | null;
+	setAttribute(name: string, value: string): void;
+	removeAttribute(name: string): void;
+	remove(): void;
+	append(child: unknown): void;
+	querySelector(selector: string): DomNode | null;
+	querySelectorAll(selector: string): ArrayLike<DomNode>;
+	matches?(selector: string): boolean;
+	parentElement?: DomNode | null;
+	style?: { cssText?: string };
+	textContent?: string | null;
+}
+interface DomDocument {
+	body?: DomNode | null;
+	head?: DomNode | null;
+	querySelectorAll(selector: string): ArrayLike<DomNode>;
+	createElement(tag: string): DomNode;
+}
+const doc =
+	(globalThis as unknown as { document?: DomDocument | null }).document ?? null;
+
+export const name = "dsh-lark-plus-client";
 export const inject = ["slots"];
 
 export interface ClientContext extends Context {
@@ -112,14 +136,14 @@ const STATE_VIEW: Record<
 		label: "未配置",
 		color: "#ffb454",
 		bg: "rgba(255,180,84,.12)",
-		hint: "手机飞书扫码，或在输入框运行 /lark-voice setup",
+		hint: "手机飞书扫码，或在输入框运行 /lark setup",
 	},
 	ready: {
 		emoji: "✅",
 		label: "已配置 · 待启动",
 		color: "#7fd1ff",
 		bg: "rgba(127,209,255,.12)",
-		hint: "在输入框运行 /lark-voice start 启动桥接",
+		hint: "在输入框运行 /lark start 启动桥接",
 	},
 	connecting: {
 		emoji: "🟡",
@@ -133,18 +157,122 @@ const STATE_VIEW: Record<
 		label: "运行中",
 		color: "#7ee2a8",
 		bg: "rgba(126,226,168,.12)",
-		hint: "/lark-voice stop · /lark-voice restart · 发消息即可对话",
+		hint: "/lark stop · /lark restart · 发消息即可对话",
 	},
 	error: {
 		emoji: "🔴",
 		label: "连接异常",
 		color: "#ff8a80",
 		bg: "rgba(255,138,128,.12)",
-		hint: "/lark-voice restart 重连 · /lark-voice status 查看详情",
+		hint: "/lark restart 重连 · /lark status 查看详情",
 	},
 };
 
+/**
+ * Voice players: every inbound clip the bridge persisted is served read-only
+ * at /plugins/lark-plus/audio?name=…, so a voice message only needs a play
+ * bar under its text. This hides the raw attachment card and appends an
+ * <audio controls> to the message stack (bubble first, player second).
+ *
+ * Ownership: the bubble belongs to React, so nothing here rewrites React's
+ * children — a card is only marked with an attribute, players are appended as
+ * siblings, and a re-render that drops them is re-decorated by the observer.
+ * The per-name check keeps repeated mutations from stacking duplicates.
+ */
+function installVoicePlayers(ctx: ClientContext): void {
+	if (doc?.body === undefined || doc.body === null) return;
+	const AUDIO_NAME = /\.(ogg|oga|opus|mp3|wav|m4a|aac|flac|bin)$/i;
+	const PLAYER = "data-lark-plus-player";
+	const CARD = "data-lark-plus-card";
+	const ROW = "[data-message-attachments]";
+	const BASE = "/plugins/lark-plus/audio?name=";
+	for (const stale of Array.from(doc.querySelectorAll("style[data-lark-plus-style]"))) stale.remove();
+	const style = doc.createElement("style");
+	style.setAttribute("data-lark-plus-style", "");
+	if (style.textContent !== undefined) {
+		style.textContent = [
+			"[" + CARD + "] { display: none !important; }",
+			"[" + PLAYER + "] { display: block; height: 34px; max-width: min(320px, 100%); margin: 6px 0 0; }",
+		].join("\n");
+	}
+	doc.head?.append(style);
+
+	/** Voice attachment name of one card (the chat sets it as the title). */
+	const nameOf = (card: DomNode): string => (card.getAttribute("title") ?? "").trim();
+
+	/** Hide this row's audio cards and make sure every clip has one player. */
+	const decorate = (row: DomNode): void => {
+		const wanted: string[] = [];
+		const cards = row.querySelectorAll("span[title]");
+		for (let i = 0; i < cards.length; i += 1) {
+			const card = cards[i];
+			if (card === undefined) continue;
+			const name = nameOf(card);
+			if (name === "" || !AUDIO_NAME.test(name)) continue;
+			card.setAttribute(CARD, "");
+			if (!wanted.includes(name)) wanted.push(name);
+		}
+		/** Players live in the message stack, i.e. below the text bubble. */
+		const stack = row.parentElement ?? row;
+		const players = stack.querySelectorAll("[" + PLAYER + "]");
+		const keep: string[] = [];
+		for (let i = 0; i < players.length; i += 1) {
+			const node = players[i];
+			if (node === undefined) continue;
+			const name = node.getAttribute(PLAYER) ?? "";
+			if (!wanted.includes(name)) node.remove();
+			else keep.push(name);
+		}
+		for (const name of wanted) {
+			if (keep.includes(name)) continue;
+			const audio = doc.createElement("audio");
+			audio.setAttribute(PLAYER, name);
+			audio.setAttribute("controls", "");
+			audio.setAttribute("preload", "metadata");
+			audio.setAttribute("src", BASE + encodeURIComponent(name));
+			stack.append(audio);
+		}
+	};
+
+	/** Decorate every message stack inside a (possibly new) subtree. */
+	const scan = (root: DomNode | null | undefined): void => {
+		if (root === null || root === undefined) return;
+		const rows: DomNode[] = [];
+		if (root.matches?.(ROW) === true) rows.push(root);
+		const found = root.querySelectorAll(ROW);
+		for (let i = 0; i < found.length; i += 1) {
+			const row = found[i];
+			if (row !== undefined) rows.push(row);
+		}
+		for (const row of rows) decorate(row);
+	};
+
+	scan(doc.body);
+	const Observer = (globalThis as unknown as {
+		MutationObserver?: new (
+			cb: (records: Array<{ addedNodes: ArrayLike<DomNode> }>) => void,
+		) => { observe(target: DomNode, options: { childList: boolean; subtree: boolean }): void; disconnect(): void };
+	}).MutationObserver;
+	if (Observer === undefined) return;
+	const observer = new Observer((records) => {
+		for (const record of records) {
+			for (let i = 0; i < record.addedNodes.length; i += 1) scan(record.addedNodes[i] ?? null);
+		}
+	});
+	observer.observe(doc.body, { childList: true, subtree: true });
+	ctx.effect(
+		() => () => {
+			observer.disconnect();
+			for (const node of Array.from(doc.querySelectorAll("[" + PLAYER + "]"))) node.remove();
+			for (const card of Array.from(doc.querySelectorAll("[" + CARD + "]"))) card.removeAttribute(CARD);
+			style.remove();
+		},
+		"lark-plus: voice players",
+	);
+}
 export function apply(ctx: ClientContext): void {
+	// Voice players: a voice message is text + a play bar, nothing else.
+	installVoicePlayers(ctx);
 	const SidebarAction = (): unknown => {
 		const [open, setOpen] = useState<boolean>(false);
 		const [st, setSt] = useState<StatusPayload | undefined>(undefined);
@@ -156,7 +284,7 @@ export function apply(ctx: ClientContext): void {
 			const origin = win.location?.origin ?? "";
 			const fetchStatus = (): void => {
 				void win
-					.fetch?.(`${origin}/plugins/lark-voice/status`)
+					.fetch?.(`${origin}/plugins/lark-plus/status`)
 					.then((r) => (r.ok ? r.json() : Promise.reject(new Error("status"))))
 					.then((j) => setSt(j as StatusPayload))
 					.catch(() => setSt((prev) => prev));
@@ -271,7 +399,7 @@ export function apply(ctx: ClientContext): void {
 		// QR only while unconfigured; hidden (but fetched) until it loads.
 		const qrImg = showQr
 			? h("img", {
-					src: `${origin}/plugins/lark-voice/qr?t=${qrTs}`,
+					src: `${origin}/plugins/lark-plus/qr?t=${qrTs}`,
 					alt: "Lark Link setup QR",
 					onError: () => setQrLoaded(false),
 					onLoad: () => setQrLoaded(true),
@@ -295,7 +423,7 @@ export function apply(ctx: ClientContext): void {
 								fontSize: "11px",
 							},
 						},
-						"二维码生成中…（若无，确认已在输入框运行 /lark-voice setup）",
+						"二维码生成中…（若无，确认已在输入框运行 /lark setup）",
 					)
 				: null;
 
@@ -311,9 +439,9 @@ export function apply(ctx: ClientContext): void {
 					lineHeight: 1.6,
 				},
 			},
-			"重新配置：/lark-voice uninstall-clean → /lark-voice setup",
+			"重新配置：/lark uninstall-clean → /lark setup",
 			h("br"),
-			"详情与全链路：/lark-voice status",
+			"详情与全链路：/lark status",
 		);
 
 		const panel = h(
@@ -384,7 +512,7 @@ export function apply(ctx: ClientContext): void {
 		ctx.slots.register(
 			{
 				name: "sidebar.footer.action",
-				id: "lark-voice-entry",
+				id: "lark-plus-entry",
 				order: 100,
 				label: "Lark Link",
 			},

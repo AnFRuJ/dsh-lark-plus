@@ -16,10 +16,10 @@ import {
 test("projectKey: matches the DSH session persistence encoding", () => {
 	assert.equal(projectKeyOf("/home/zand/proj"), "--home-zand-proj--");
 	assert.equal(projectKeyOf("/home/zand"), "--home-zand--");
-	// 真实样本：~/.dsh/sessions/--home-zand-proj-dsh-lark-voice--
+	// 真实样本：~/.dsh/sessions/--home-zand-proj-dsh-lark-plus--
 	assert.equal(
-		projectKeyOf("/home/zand/proj/dsh-lark-voice"),
-		"--home-zand-proj-dsh-lark-voice--",
+		projectKeyOf("/home/zand/proj/dsh-lark-plus"),
+		"--home-zand-proj-dsh-lark-plus--",
 	);
 });
 
@@ -40,10 +40,10 @@ test("projectKey: unsafe characters use the ~XXXX escape", () => {
 
 // ---- decodeSessionDirName ----------------------------------------------------
 
-test("decode: ~003A decodes back to ':' (lark-voice session ids)", () => {
+test("decode: ~003A decodes back to ':' (lark-plus session ids)", () => {
 	assert.equal(
-		decodeSessionDirName("lark-voice~003Adm~003Aoc_x~003Anonce~003A0"),
-		"lark-voice:dm:oc_x:nonce:0",
+		decodeSessionDirName("lark-plus~003Adm~003Aoc_x~003Anonce~003A0"),
+		"lark-plus:dm:oc_x:nonce:0",
 	);
 });
 
@@ -120,7 +120,7 @@ test("list: service source caps to limit", async () => {
 test("list: scan fallback reads the workspace project dir, decodes ids, sorts by mtime", async () => {
 	const root = mkdtempSync(join(tmpdir(), "dsh-ws-list-"));
 	const dir = join(root, projectKeyOf("/ws/proj"));
-	mkdirSync(join(dir, "lark-voice~003Adm~003Aoc_x~003An1~003A0"), {
+	mkdirSync(join(dir, "lark-plus~003Adm~003Aoc_x~003An1~003A0"), {
 		recursive: true,
 	});
 	mkdirSync(join(dir, "gui-uuid-2"), { recursive: true });
@@ -128,7 +128,7 @@ test("list: scan fallback reads the workspace project dir, decodes ids, sorts by
 	// 另一个工作区（不该出现）
 	mkdirSync(join(root, projectKeyOf("/other"), "stranger"), { recursive: true });
 	writeFileSync(
-		join(dir, "lark-voice~003Adm~003Aoc_x~003An1~003A0", "session.jsonl.zstd"),
+		join(dir, "lark-plus~003Adm~003Aoc_x~003An1~003A0", "session.jsonl.zstd"),
 		"x",
 	);
 	writeFileSync(join(dir, "gui-uuid-2", "session.jsonl.zstd"), "x");
@@ -136,7 +136,7 @@ test("list: scan fallback reads the workspace project dir, decodes ids, sorts by
 	// mtime: gui-uuid-2 更新 → 排最前
 	const now = Date.now();
 	const f1 = join(dir, "gui-uuid-2", "session.jsonl.zstd");
-	const f2 = join(dir, "lark-voice~003Adm~003Aoc_x~003An1~003A0", "session.jsonl.zstd");
+	const f2 = join(dir, "lark-plus~003Adm~003Aoc_x~003An1~003A0", "session.jsonl.zstd");
 	await new Promise((r) => setTimeout(r, 20));
 	writeFileSync(f1, "newer");
 
@@ -146,7 +146,7 @@ test("list: scan fallback reads the workspace project dir, decodes ids, sorts by
 	});
 	assert.deepEqual(
 		rows.map((r) => r.id),
-		["gui-uuid-2", "lark-voice:dm:oc_x:n1:0"],
+		["gui-uuid-2", "lark-plus:dm:oc_x:n1:0"],
 	);
 	assert.equal(rows[0]!.source, "scan");
 	assert.ok(rows[0]!.createdAt >= rows[1]!.createdAt);

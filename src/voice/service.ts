@@ -47,13 +47,13 @@ export interface VoiceService {
 	ready(): boolean;
 	/** ffmpeg that will be used (undefined = not found). */
 	ffmpeg(): string | undefined;
-	/** Human-readable one-liner for /lark-voice status. */
+	/** Human-readable one-liner for /lark status. */
 	statusLine(): string;
 	/** Live download progress. */
 	download(): DownloadState;
 	/** Start the model download in the background (resolves immediately). */
 	startDownload(): void;
-	/** Await a full model download (used by /lark-voice download). */
+	/** Await a full model download (used by /lark download). */
 	downloadNow(): Promise<DownloadState>;
 	/**
 	 * Transcribe audio bytes received from Feishu.

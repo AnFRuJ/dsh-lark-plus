@@ -4,8 +4,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, win32 } from "n
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
 import { gzipSync, zstdDecompressSync } from "node:zlib";
+import { randomUUID } from "node:crypto";
 import * as qrcode from "qrcode-terminal";
 import QRCode from "qrcode";
 import { homedir, tmpdir } from "node:os";
@@ -158,6 +158,33 @@ function createConfigStore(stateDir, initialOverrides) {
 function resolveAgentPreset(key, deps, presetOverrides) {
 	return normalizeAgentPreset(presetOverrides.get(key) ?? deps.preset?.(key) ?? "ptc");
 }
+/** Pending per-session projection checkpoints (one timer each, replaced). */
+const projectionCheckpoints = /* @__PURE__ */ new Map();
+/**
+* Durably checkpoint one session's projection (title, list metadata, …) shortly
+* after its turn ends.
+*
+* WHY: DSH's session list reads COLD sessions' titles from the projection cache
+* only. Bridge-owned sessions were never opened in the Web UI, so without this
+* write the GUI showed them as "未命名" after every restart, while opening one
+* (making it live) revealed the real title. The delay lets the async title
+* generation land first; failures are swallowed — a missing cache row must
+* never affect the conversation.
+*/
+function scheduleProjectionCheckpoint(ctx, session) {
+	const id = session?.id;
+	if (typeof id !== "string" || id === "") return;
+	const cache = ctx?.get?.("sessionProjectionCache");
+	if (typeof cache?.write !== "function") return;
+	const previous = projectionCheckpoints.get(id);
+	if (previous !== void 0) clearTimeout(previous);
+	projectionCheckpoints.set(id, setTimeout(() => {
+		projectionCheckpoints.delete(id);
+		try {
+			Promise.resolve(cache.write?.(session)).catch(() => void 0);
+		} catch {}
+	}, 2500));
+}
 function textOf(blocks) {
 	return (blocks ?? []).filter((b) => b.type === "text" && b.text !== void 0).map((b) => b.text).join("");
 }
@@ -257,7 +284,7 @@ function createDshAdapter(deps) {
 	const ensureInFlight = /* @__PURE__ */ new Map();
 	let runNonce = deps.runNonce ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 	const generations = /* @__PURE__ */ new Map();
-	const bridgeKey = (key) => `${deps.sessionPrefix}:${key}:${runNonce}:${generations.get(key) ?? 0}`;
+	const bridgeKey = (key) => `${deps.sessionPrefix}-${key.replace(/[^A-Za-z0-9_-]+/g, "-")}-${runNonce}-${generations.get(key) ?? 0}`;
 	const pendingResume = /* @__PURE__ */ new Map();
 	const presetOverrides = /* @__PURE__ */ new Map();
 	const imageUnsupportedKeys = /* @__PURE__ */ new Set();
@@ -522,6 +549,9 @@ function createDshAdapter(deps) {
 					sessionId = activeId;
 				} catch (err) {
 					deps.logger?.warn(`failed to resume active session "${activeId}" for ${key}: ${err instanceof Error ? err.message : String(err)} — falling back to create fresh session`);
+					try {
+						deps.onResumeFallback?.(key, activeId, err);
+					} catch {}
 				}
 				if (resumedOwned) owned = resumedOwned;
 				else {
@@ -676,6 +706,7 @@ function createDshAdapter(deps) {
 					if (final !== void 0) out.finalText = final;
 					lastAssistantText.delete(key);
 				}
+				if (out.type === "turn/end") scheduleProjectionCheckpoint(c, agent.session);
 				const set = listeners.get(key);
 				if (set) for (const fn of set) fn(out);
 			}) ?? (() => {});
@@ -954,7 +985,8 @@ const BRIDGE_COMMANDS = /* @__PURE__ */ new Set([
 	"permission",
 	"new",
 	"resume",
-	"goal"
+	"goal",
+	"menu"
 ]);
 function stripLeadingMentions(text) {
 	let cur = text.trim();
@@ -1154,6 +1186,76 @@ function createConversationConfigStore(file) {
 }
 //#endregion
 //#region src/sessions/workspace-sessions.ts
+/** Newest session-log file in one session directory, or undefined.
+*
+* DSH renamed the log to session.v4.jsonl.zstd; matching only the old
+* "session.jsonl.zstd" name made every scan-sourced listing empty (the GUI
+* showed sessions but /resume answered "该工作区暂无历史会话日志"). */
+function sessionLogPath(sessionDir) {
+	let names;
+	try {
+		names = readdirSync(sessionDir);
+	} catch {
+		return;
+	}
+	let best;
+	let bestMtime = -1;
+	for (const entry of names) {
+		if (!/^session(\.[A-Za-z0-9]+)?\.jsonl(\.zstd)?$/.test(entry)) continue;
+		let mtime;
+		try {
+			mtime = statSync(join(sessionDir, entry)).mtimeMs;
+		} catch {
+			continue;
+		}
+		if (mtime > bestMtime) {
+			bestMtime = mtime;
+			best = join(sessionDir, entry);
+		}
+	}
+	return best;
+}
+/** Read the session's own title straight out of its (zstd-framed) log, so a
+*  filesystem-scan listing can show real titles instead of "会话". */
+function titleFromSessionLog(logPath) {
+	try {
+		const raw = readFileSync(logPath);
+		const magic = Buffer.from([
+			40,
+			181,
+			47,
+			253
+		]);
+		const offsets = [];
+		let at = raw.indexOf(magic);
+		if (at < 0) return void 0;
+		while (at >= 0) {
+			offsets.push(at);
+			at = raw.indexOf(magic, at + 4);
+		}
+		let text = "";
+		for (let i = 0; i < offsets.length; i += 1) {
+			const start = offsets[i] ?? 0;
+			const end = i + 1 < offsets.length ? offsets[i + 1] ?? raw.length : raw.length;
+			try {
+				text += zstdDecompressSync(raw.subarray(start, end)).toString("utf8");
+			} catch {}
+		}
+		let title;
+		for (const line of text.split("\n")) {
+			if (!line.includes("session/title")) continue;
+			try {
+				const record = JSON.parse(line);
+				if (record.type !== "session/title") continue;
+				const value = record.data?.title?.trim();
+				if (value) title = value.slice(0, 36);
+			} catch {}
+		}
+		return title;
+	} catch {
+		return;
+	}
+}
 /**
 * Extract a human-readable title from a session's events:
 * 1. session/title event (highest precedence)
@@ -1229,7 +1331,8 @@ async function listWorkspaceSessions(deps) {
 		const dir = join(deps.sessionsRoot, projectKeyOf(deps.cwd));
 		if (existsSync(dir)) {
 			for (const name of readdirSync(dir)) {
-				const log = join(dir, name, "session.jsonl.zstd");
+				const log = sessionLogPath(join(dir, name));
+				if (log === void 0) continue;
 				let mtime;
 				try {
 					mtime = statSync(log).mtimeMs;
@@ -1238,7 +1341,7 @@ async function listWorkspaceSessions(deps) {
 				}
 				const id = decodeSessionDirName(name);
 				if (exclude.has(id)) continue;
-				const title = deps.titleFor?.(id);
+				const title = deps.titleFor?.(id) ?? titleFromSessionLog(log);
 				rows.push({
 					id,
 					createdAt: mtime,
@@ -2983,7 +3086,7 @@ function createDiagnosticsService(deps) {
 		const s = deps.ctx.status.get();
 		const cfg = deps.ctx.cfg();
 		const lines = [
-			"# dsh-lark-voice 诊断包",
+			"# dsh-lark-plus 诊断包",
 			"",
 			`生成时间: ${(/* @__PURE__ */ new Date()).toISOString()}`,
 			`桥状态: ${deps.ctx.started() ? "运行中" : "未启动"}`,
@@ -3006,7 +3109,7 @@ function createDiagnosticsService(deps) {
 			"```",
 			"",
 			"## 环境",
-			"- dsh-lark-voice: 0.1.0",
+			"- dsh-lark-plus: 0.1.0",
 			"- Node: " + process.version
 		].join("\n");
 		return {
@@ -3854,8 +3957,8 @@ function permissionCard(current) {
 * - Stored preset badge per row; the CURRENT session is listed too but its
 *   button is disabled (users see where they are).
 * - Button op carries the session id URI-ENCODED — the card-action dispatcher
-*   splits op at the FIRST ":" and lark-voice session ids are full of colons
-*   (`lark-voice:dm:oc_x:nonce:0`); an unencoded id would lose its prefix and
+*   splits op at the FIRST ":" and lark-plus session ids are full of colons
+*   (`lark-plus:dm:oc_x:nonce:0`); an unencoded id would lose its prefix and
 *   the click would resolve to 未找到会话.
 */
 function resumeCard(sessions, currentSessionId, opts = {}) {
@@ -3925,13 +4028,74 @@ function helpCard() {
 		"- `/doctor` 生成诊断包（含 session log）",
 		"- `/model` 查看/切换模型",
 		"- `/lark-config k=v` 热改配置（嵌套键如 `streaming.enabled=true`）",
-		"- `/lark-voice setup|start|stop|status` 桥接管理",
+		"- `/lark setup|start|stop|status` 桥接管理",
 		"- `/goal` 等 DSH 命令原样执行",
 		"- skill 无需前缀：直接说任务（如「用 X skill 做 Y」）"
 	].join("\n"), {
 		header: "Lark Link 帮助",
 		accent: true
 	});
+}
+/** Command panel card with one-click buttons. */
+function commandPanelCard() {
+	return {
+		schema: "2.0",
+		body: {
+			header: {
+				title: {
+					tag: "plain_text",
+					content: "命令面板"
+				},
+				template: "blue"
+			},
+			elements: [
+				{
+					tag: "markdown",
+					content: "**命令面板**\n点击按钮一键执行，或直接输入文字聊天："
+				},
+				...commandPanelButtons(),
+				{
+					tag: "markdown",
+					content: "文本命令：`/status` `/new` `/sessions` `/resume` `/mode` `/permission` `/workspace` `/stop` `/doctor` `/help`\n\n`/goal` 等 DSH 命令原样执行；skill 无需前缀，直接描述任务即可。"
+				}
+			]
+		}
+	};
+}
+/**
+* Buttons of the command panel: BARE command names as ops — the card-action
+* dispatcher forwards unhandled ops to the bridge handler, so a tap is
+* identical to typing the command. This is what makes the commands
+* discoverable without configuring Feishu's own per-application "/" menu.
+*/
+function commandPanelButtons() {
+	return [
+		button("桥接状态", { op: "status" }),
+		button("新会话", { op: "new" }),
+		button("历史会话", { op: "sessions" }),
+		button("停止任务", { op: "stop" }),
+		button("模式", { op: "mode" }),
+		button("权限", { op: "permission" }),
+		button("模型", { op: "model" }),
+		button("诊断包", { op: "doctor" }),
+		button("配置", { op: "lark-config" }),
+		button("帮助", { op: "help" })
+	];
+}
+/**
+* The "where am I" block /status appends: the CURRENT session of this chat,
+* its workspace/mode/model, and how to move to another one. Until now only
+* the Web UI could answer that question.
+*/
+function sessionStatusBlock(info) {
+	const out = ["**当前会话**"];
+	out.push("- 会话 ID：`" + (info.sessionId ?? "（尚未建立，下一条消息创建）") + "`");
+	if (info.title) out.push("- 标题：" + info.title.slice(0, 48));
+	if (info.workspace) out.push("- 工作区：" + info.workspace);
+	if (info.preset) out.push("- 模式：" + info.preset);
+	if (info.model) out.push("- 模型：" + info.model);
+	out.push("- 切换会话：`/sessions` 看历史（点按钮或 `/resume <序号>`）；新起一条：`/new`。");
+	return out.join("\n");
 }
 //#endregion
 //#region src/outbound/task-card-syncer.ts
@@ -4308,7 +4472,7 @@ function createAuthSetup(deps) {
 	return { async run(opts) {
 		opts.onStatusChange?.("创建应用中…");
 		const created = await deps.registerApp({
-			source: "dsh-lark-voice",
+			source: "dsh-lark-plus",
 			addons: buildSetupAddons(),
 			onQRCodeReady: (info) => opts.onQRCodeReady(info),
 			onStatusChange: (info) => opts.onStatusChange?.(info.status ?? "…")
@@ -4347,7 +4511,7 @@ async function postForm(url, params, signal) {
 			headers: {
 				"Content-Type": "application/x-www-form-urlencoded",
 				Accept: "application/json",
-				"User-Agent": "dsh-lark-voice (device-code client)"
+				"User-Agent": "dsh-lark-plus (device-code client)"
 			},
 			body: new URLSearchParams(params).toString(),
 			signal
@@ -4459,8 +4623,105 @@ function registerAppWithFetch() {
 			}
 			await sleep(interval, signal);
 		}
-		throw new Error("注册轮询超时（二维码已过期），请重新运行 /lark-voice setup");
+		throw new Error("注册轮询超时（二维码已过期），请重新运行 /lark setup");
 	};
+}
+//#endregion
+//#region src/host/voice-audio-route.ts
+/** Extension → Content-Type. Persisted Feishu clips are .ogg (or .bin). */
+const VOICE_AUDIO_TYPES = {
+	".ogg": "audio/ogg",
+	".oga": "audio/ogg",
+	".opus": "audio/ogg",
+	".bin": "audio/ogg",
+	".wav": "audio/wav",
+	".mp3": "audio/mpeg",
+	".m4a": "audio/mp4",
+	".aac": "audio/aac",
+	".flac": "audio/flac"
+};
+/**
+* Resolve one requested clip inside mediaDir, or undefined when the name is not
+* a bare, whitelisted audio file name that exists there.
+*/
+function voiceAudioFile(name, mediaDir) {
+	if (name === "" || name === "." || name === "..") return void 0;
+	if (name.includes("/") || name.includes("\\") || name.includes("\0")) return void 0;
+	if (basename(name) !== name) return void 0;
+	const dot = name.lastIndexOf(".");
+	if (dot < 0) return void 0;
+	if (VOICE_AUDIO_TYPES[name.slice(dot).toLowerCase()] === void 0) return void 0;
+	const file = join(mediaDir, name);
+	try {
+		return existsSync(file) && statSync(file).isFile() ? file : void 0;
+	} catch {
+		return;
+	}
+}
+/** GET/HEAD one clip, with Range support so the player can seek. */
+function voiceAudioRoute(req, res, mediaDir) {
+	const deny = (code, message) => {
+		try {
+			res.writeHead(code, {
+				"Content-Type": "text/plain; charset=utf-8",
+				"Cache-Control": "no-store"
+			});
+			res.end(message);
+		} catch {}
+	};
+	const method = req.method ?? "GET";
+	if (method !== "GET" && method !== "HEAD") return deny(405, "GET only");
+	let name = "";
+	try {
+		name = new URL(req.url ?? "/", "http://dsh.internal").searchParams.get("name") ?? "";
+	} catch {
+		return deny(400, "bad url");
+	}
+	const file = voiceAudioFile(name, mediaDir);
+	if (file === void 0) return deny(404, "voice audio not found");
+	let size = 0;
+	try {
+		size = statSync(file).size;
+	} catch {
+		return deny(404, "voice audio unreadable");
+	}
+	const type = VOICE_AUDIO_TYPES[file.slice(file.lastIndexOf(".")).toLowerCase()] ?? "application/octet-stream";
+	let start = 0;
+	let end = size - 1;
+	let code = 200;
+	const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers?.range ?? "").trim());
+	if (range !== null) {
+		const rawStart = range[1] ?? "";
+		const rawEnd = range[2] ?? "";
+		if (rawStart === "" && rawEnd === "") return deny(416, "bad range");
+		if (rawStart === "") {
+			const tail = Number(rawEnd);
+			if (!Number.isFinite(tail) || tail <= 0) return deny(416, "bad range");
+			start = Math.max(0, size - tail);
+		} else {
+			start = Number(rawStart);
+			if (rawEnd !== "") end = Math.min(size - 1, Number(rawEnd));
+		}
+		if (!Number.isFinite(start) || start < 0 || start >= size || end < start) return deny(416, "bad range");
+		code = 206;
+	}
+	let body;
+	try {
+		body = readFileSync(file).subarray(start, end + 1);
+	} catch {
+		return deny(404, "voice audio unreadable");
+	}
+	const headers = {
+		"Content-Type": type,
+		"Content-Length": String(body.byteLength),
+		"Accept-Ranges": "bytes",
+		"Cache-Control": "no-store"
+	};
+	if (code === 206) headers["Content-Range"] = "bytes " + start + "-" + end + "/" + size;
+	try {
+		res.writeHead(code, headers);
+		res.end(method === "HEAD" ? void 0 : body);
+	} catch {}
 }
 //#endregion
 //#region src/common/paths.ts
@@ -4494,6 +4755,101 @@ function resolveInWorkspacePath(p, root) {
 	return {
 		abs,
 		ok: rel === "" || !rel.startsWith("..") && !isAbsolute(rel) && !win32.isAbsolute(rel)
+	};
+}
+//#endregion
+//#region src/voice/wav.ts
+/** SenseVoice wants 16 kHz. */
+const DEFAULT_TARGET_SAMPLE_RATE = 16e3;
+/** Read one byte, 0 when past the end (keeps the parser total without casts). */
+function byteAt(bytes, offset) {
+	return bytes[offset] ?? 0;
+}
+/**
+* Decode a WAV buffer into mono float samples at \`targetSampleRate\`.
+* @param input - WAV bytes (Buffer, Uint8Array or any typed-array view).
+* @param targetSampleRate - rate to resample to when the file disagrees.
+* @returns mono samples and the sample rate they are at.
+* @throws Error when the container or the PCM format is unsupported.
+*/
+function readWavSamples(input, targetSampleRate = DEFAULT_TARGET_SAMPLE_RATE) {
+	const bytes = input;
+	if (bytes.byteLength === 0) return {
+		samples: /* @__PURE__ */ new Float32Array(0),
+		sampleRate: targetSampleRate
+	};
+	if (bytes.byteLength < 12) throw new Error("WAV 数据过短，无法解析");
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const tag = (offset) => String.fromCharCode(byteAt(bytes, offset), byteAt(bytes, offset + 1), byteAt(bytes, offset + 2), byteAt(bytes, offset + 3));
+	if (tag(0) !== "RIFF" || tag(8) !== "WAVE") throw new Error("不是合法的 RIFF/WAVE 音频");
+	let offset = 12;
+	let fmt;
+	let data;
+	while (offset + 8 <= bytes.byteLength) {
+		const id = tag(offset);
+		const size = view.getUint32(offset + 4, true);
+		const body = offset + 8;
+		if (id === "fmt " && body + 16 <= bytes.byteLength) fmt = {
+			code: view.getUint16(body, true),
+			channels: view.getUint16(body + 2, true),
+			sampleRate: view.getUint32(body + 4, true),
+			bits: view.getUint16(body + 14, true)
+		};
+		else if (id === "data") data = {
+			start: body,
+			size: Math.min(size, Math.max(0, bytes.byteLength - body))
+		};
+		offset = body + size + size % 2;
+		if (fmt !== void 0 && data !== void 0) break;
+	}
+	if (fmt === void 0 || data === void 0) throw new Error("WAV 缺少 fmt/data 数据块");
+	const { code, channels, bits, sampleRate } = fmt;
+	if (!(channels >= 1)) throw new Error("WAV 声道数非法：" + String(channels));
+	if (!(sampleRate > 0)) throw new Error("WAV 采样率非法：" + String(sampleRate));
+	const bytesPerSample = bits / 8;
+	if (!(bytesPerSample >= 1)) throw new Error("WAV 位深非法：" + String(bits));
+	if (code !== 1 && code !== 3) throw new Error("暂不支持的 WAV 编码格式：" + String(code));
+	const frames = Math.floor(data.size / (bytesPerSample * channels));
+	if (frames <= 0) return {
+		samples: /* @__PURE__ */ new Float32Array(0),
+		sampleRate: targetSampleRate
+	};
+	const pcm = new Float32Array(frames);
+	for (let i = 0; i < frames; i += 1) {
+		let sum = 0;
+		for (let c = 0; c < channels; c += 1) {
+			const p = data.start + (i * channels + c) * bytesPerSample;
+			let value;
+			if (code === 3) value = view.getFloat32(p, true);
+			else if (bits === 8) value = (view.getUint8(p) - 128) / 128;
+			else if (bits === 16) value = view.getInt16(p, true) / 32768;
+			else if (bits === 24) {
+				const lo = view.getUint8(p);
+				const mid = view.getUint8(p + 1);
+				value = (view.getInt8(p + 2) << 16 | mid << 8 | lo) / 8388608;
+			} else if (bits === 32) value = view.getInt32(p, true) / 2147483648;
+			else throw new Error("暂不支持的 WAV 位深：" + String(bits));
+			sum += value;
+		}
+		pcm[i] = sum / channels;
+	}
+	if (sampleRate === targetSampleRate) return {
+		samples: pcm,
+		sampleRate: targetSampleRate
+	};
+	const target = Math.max(1, Math.round(pcm.length * targetSampleRate / sampleRate));
+	const out = new Float32Array(target);
+	const ratio = target > 1 ? (pcm.length - 1) / (target - 1) : 0;
+	for (let i = 0; i < target; i += 1) {
+		const x = i * ratio;
+		const i0 = Math.floor(x);
+		const i1 = Math.min(pcm.length - 1, i0 + 1);
+		const f = x - i0;
+		out[i] = (pcm[i0] ?? 0) * (1 - f) + (pcm[i1] ?? 0) * f;
+	}
+	return {
+		samples: out,
+		sampleRate: targetSampleRate
 	};
 }
 //#endregion
@@ -4598,12 +4954,8 @@ function transcodeToWav(input, output, ffmpeg, timeoutMs = 6e4) {
 let recognizer;
 let recognizerDir;
 let loading;
-let addon;
 function loadSherpa() {
 	return require_("sherpa-onnx-node/non-streaming-asr.js");
-}
-function loadAddon() {
-	return require_("sherpa-onnx-node/addon.js");
 }
 function buildRecognizerConfig(dir) {
 	const { model, tokens } = modelFiles(dir);
@@ -4666,8 +5018,7 @@ async function transcribeWavBuffer(wav, opts = {}) {
 	try {
 		releaseRecognizerIfStale(dir);
 		const rec = await ensureRecognizer(dir);
-		addon ??= loadAddon();
-		const wave = addon.readWaveFromBinary(wav);
+		const wave = readWavSamples(wav, TARGET_SAMPLE_RATE);
 		let samples = wave.samples;
 		if (wave.sampleRate !== 16e3) {
 			const ratio = TARGET_SAMPLE_RATE / wave.sampleRate;
@@ -4984,7 +5335,7 @@ function createVoiceService(logger, opts = {}) {
 }
 //#endregion
 //#region src/index.ts
-const name = "dsh-lark-voice";
+const name = "dsh-lark-plus";
 const inject = [
 	"tools",
 	"commands",
@@ -5008,16 +5359,16 @@ function voiceOptionsFrom(cfg) {
 		ffmpegTimeoutMs: v?.ffmpegTimeoutMs
 	};
 }
-/** Bridge state directory (<DSH_HOME>/lark-voice, overridable). */
+/** Bridge state directory (<DSH_HOME>/lark, overridable). */
 function stateDir() {
-	return process.env.DSH_LARK_VOICE_HOME ?? join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "lark-voice");
+	return process.env.DSH_LARK_PLUS_HOME ?? join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "lark-plus");
 }
 function apply(ctx, rawConfig) {
 	const cfg = rawConfig;
 	if (cfg?.enabled === false) return;
 	const dir = stateDir();
 	mkdirSync(dir, { recursive: true });
-	const logger = createLogger("lark-voice");
+	const logger = createLogger("lark-plus");
 	const configStore = createConfigStore(dir, {
 		groupPolicy: cfg?.groupPolicy,
 		denyList: cfg?.denyList
@@ -5059,7 +5410,7 @@ function apply(ctx, rawConfig) {
 	try {
 		backend = createDshAdapter({
 			ctx,
-			sessionPrefix: "lark-voice",
+			sessionPrefix: "lark-plus",
 			runNonce,
 			logger,
 			cwd: (key) => convCfg.get(key).workspaceRoot ?? (getCfg().workspaceRoot || process.cwd()),
@@ -5075,7 +5426,37 @@ function apply(ctx, rawConfig) {
 				convCfg.set(key, { activeSessionId: sessionId });
 			},
 			askUserQuestion,
-			permissionMode: () => getCfg().permissionMode
+			permissionMode: () => getCfg().permissionMode,
+			onResumeFallback: (key, lostSessionId, cause) => {
+				try {
+					const reason = cause instanceof Error ? cause.message : String(cause);
+					logger.warn("session resume fell back for " + key + ": " + reason);
+					const route = routeStore.get(key);
+					if (route === void 0 || !route.chatId) return;
+					const queued = outbox.enqueue({
+						dedupeKey: "bridge:session-fallback:" + Date.now().toString(36),
+						laneKey: key,
+						route: {
+							sessionKey: key,
+							chatId: route.chatId,
+							chatType: route.chatType
+						},
+						kind: "command-reply",
+						payload: {
+							kind: "text",
+							text: [
+								"⚠️ **没能接续上次的会话**，已新开一个空会话。",
+								"- 原会话：`" + lostSessionId + "`",
+								"- 原因：" + reason.slice(0, 300),
+								"- 想回去：发 `/sessions` 点一下原会话，或 `/resume <序号>`；历史内容都还在。"
+							].join("\n")
+						}
+					});
+					if (queued instanceof Promise) queued.catch(() => void 0);
+				} catch (err) {
+					logger.warn("resume fallback notice failed: " + String(err));
+				}
+			}
 		});
 	} catch (err) {
 		logger.warn(`DSH adapter unavailable — using in-memory backend: ${String(err)}`);
@@ -5095,7 +5476,7 @@ function apply(ctx, rawConfig) {
 	if (webServer) {
 		ctx.effect(() => webServer.register({
 			kind: "exact",
-			path: "/plugins/lark-voice/qr",
+			path: "/plugins/lark-plus/qr",
 			handler: (_req, res) => {
 				const r = res;
 				if (activeQr && Date.now() < activeQr.expireAt) {
@@ -5106,13 +5487,13 @@ function apply(ctx, rawConfig) {
 					r.end(activeQr.png);
 				} else {
 					r.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-					r.end("no active lark-voice setup qr (run /lark-voice setup)");
+					r.end("no active lark-plus setup qr (run /lark setup)");
 				}
 			}
-		}), "lark-voice: webui qr route");
+		}), "lark-plus: webui qr route");
 		ctx.effect(() => webServer.register({
 			kind: "exact",
-			path: "/plugins/lark-voice/status",
+			path: "/plugins/lark-plus/status",
 			handler: async (_req, res) => {
 				const r = res;
 				const configured = Boolean(await resolveCredentials(credStore, getCfg().credentialRef));
@@ -5125,7 +5506,12 @@ function apply(ctx, rawConfig) {
 					configured
 				}));
 			}
-		}), "lark-voice: webui status route");
+		}), "lark-plus: webui status route");
+		ctx.effect(() => webServer.register({
+			kind: "prefix",
+			path: "/plugins/lark-plus/audio",
+			handler: (req, res) => voiceAudioRoute(req, res, join(getCfg().attachments.dir.trim() || join(tmpdir(), "dsh-lark-plus", "inbound"), "media"))
+		}), "lark-plus: voice playback route");
 		ctx.effect(() => webServer.register({
 			kind: "prefix",
 			path: "/dsh-voice-local/v1",
@@ -5229,7 +5615,7 @@ function apply(ctx, rawConfig) {
 					}
 				});
 			}
-		}), "lark-voice: local transcribe route");
+		}), "lark-plus: local transcribe route");
 	}
 	const sender = {
 		async replyTo(msg, textOrCard) {
@@ -5596,9 +5982,26 @@ function apply(ctx, rawConfig) {
 	};
 	const bridgeHandler = async (name, _rawInput, msg) => {
 		switch (name) {
-			case "status":
-				await durableReply(name, msg, formatStatusLine(status.get()) + "\n\n" + statusDetailLines(status.get()).join("\n"));
+			case "status": {
+				const statusKey = bridge.conversationKeyFor(msg);
+				const statusSessionId = bridge.backend?.get(statusKey)?.sessionId ?? convCfg.get(statusKey).activeSessionId;
+				let statusTitle;
+				try {
+					const statusSessions = ctx.get?.("sessions");
+					const statusTitles = ctx.get?.("sessionTitle");
+					const statusLive = statusSessionId === void 0 ? void 0 : statusSessions?.get?.(statusSessionId);
+					if (statusLive && statusTitles?.get) statusTitle = statusTitles.get(statusLive)?.title;
+				} catch {}
+				const statusModel = liveModelFor(statusKey);
+				await durableReply(name, msg, formatStatusLine(status.get()) + "\n\n" + statusDetailLines(status.get()).join("\n") + "\n\n" + sessionStatusBlock({
+					sessionId: statusSessionId,
+					title: statusTitle,
+					workspace: convCfg.get(statusKey).workspaceRoot ?? (getCfg().workspaceRoot || process.cwd()),
+					preset: normalizeAgentPreset(convCfg.get(statusKey).preset ?? (getCfg().agentPreset || "ptc")),
+					model: statusModel.provider && statusModel.model ? statusModel.provider + "/" + statusModel.model : void 0
+				}));
 				return true;
+			}
 			case "feishu-config":
 			case "lark-config": {
 				const arg = _rawInput.trim();
@@ -5641,7 +6044,7 @@ function apply(ctx, rawConfig) {
 					const sessionId = bridge.backend?.get(key)?.sessionId ?? findLatestLarkSessionId();
 					const zipBuf = sessionId ? await buildSessionExportZip(sessionId, diag.text, diag.issueMd) : void 0;
 					if (zipBuf) {
-						const fileName = `lark-voice-doctor-${Date.now()}.zip`;
+						const fileName = `lark-plus-doctor-${Date.now()}.zip`;
 						const uploadKey = extractUploadKey(await client.uploadFile({
 							file_type: "file",
 							file_name: fileName,
@@ -5652,8 +6055,8 @@ function apply(ctx, rawConfig) {
 							return true;
 						}
 					}
-					const fileName = `lark-voice-doctor-${Date.now()}.md`;
-					const buf = Buffer.from(`# dsh-lark-voice 诊断包\n\n${diag.text}\n\n${diag.issueMd}\n`, "utf8");
+					const fileName = `lark-plus-doctor-${Date.now()}.md`;
+					const buf = Buffer.from(`# dsh-lark-plus 诊断包\n\n${diag.text}\n\n${diag.issueMd}\n`, "utf8");
 					const uploadKey = extractUploadKey(await client.uploadFile({
 						file_type: "file",
 						file_name: fileName,
@@ -5669,14 +6072,12 @@ function apply(ctx, rawConfig) {
 				await durableReply(name, msg, diag.text);
 				return true;
 			}
-			case "sessions": {
-				const keys = bridge.conversations?.keys() ?? [];
-				const lines = keys.length ? keys.map((k) => `- ${k}`) : ["（无活跃会话）"];
-				await durableReply(name, msg, `**会话列表 (${keys.length})**\n\n` + lines.join("\n"));
-				return true;
-			}
+			case "sessions": return bridgeHandler("resume", "", msg);
 			case "help":
-				await durableReply(name, msg, helpCard());
+				await durableReply(name, msg, withButtons(helpCard(), commandPanelButtons()));
+				return true;
+			case "menu":
+				await durableReply(name, msg, commandPanelCard());
 				return true;
 			case "workspace": {
 				const arg = _rawInput.trim();
@@ -6165,7 +6566,7 @@ function apply(ctx, rawConfig) {
 		dedupe,
 		allowlist: () => getCfg().allowlist,
 		wal: inboundWal,
-		inboundDir: getCfg().attachments.dir.trim() || join(tmpdir(), "dsh-lark-voice", "inbound"),
+		inboundDir: getCfg().attachments.dir.trim() || join(tmpdir(), "dsh-lark-plus", "inbound"),
 		voice,
 		transcribeAudio: voiceEnabled
 	});
@@ -6248,7 +6649,7 @@ function apply(ctx, rawConfig) {
 		const ref = getCfg().credentialRef;
 		const creds = await resolveCredentials(credStore, ref);
 		if (!creds) {
-			startBlocker = `未配置飞书凭据（ref=${ref}）。请先运行 /lark-voice setup 扫码，或设置 DSH_LARK_APP_ID/DSH_LARK_APP_SECRET 后再 /lark-voice setup。`;
+			startBlocker = `未配置飞书凭据（ref=${ref}）。请先运行 /lark setup 扫码，或设置 DSH_LARK_APP_ID/DSH_LARK_APP_SECRET 后再 /lark setup。`;
 			logger.warn(startBlocker);
 			return;
 		}
@@ -6417,7 +6818,7 @@ function apply(ctx, rawConfig) {
 			const workspaceRoot = convCfg.get(convKeyForWs).workspaceRoot ?? (getCfg().workspaceRoot || process.cwd());
 			const { abs, ok: inWorkspace } = resolveInWorkspacePath(args.path, workspaceRoot);
 			if (!inWorkspace) return "拒绝: 路径不在工作区内";
-			const key = bridge.backend?.keyForSessionId?.(sessionId) ?? (sessionId.startsWith("lark-voice:") ? sessionId.slice(11).replace(/:[a-z0-9]{8,}$/, "") : sessionId);
+			const key = bridge.backend?.keyForSessionId?.(sessionId) ?? (sessionId.startsWith("lark-plus:") ? sessionId.slice(10).replace(/:[a-z0-9]{8,}$/, "") : sessionId);
 			const route = routeStore.get(key);
 			if (!route) return "错误: 无法定位当前飞书会话";
 			const client = getLarkClient();
@@ -6486,16 +6887,16 @@ function apply(ctx, rawConfig) {
 				return lifecycleStarted ? "bridge restarted" : startBlocker ?? "bridge 未启动";
 			case "setup": return await runSetup();
 			case "uninstall-clean": return await runUninstallClean();
-			default: return "Lark Link 用法：/lark-voice setup | start | stop | restart | status | uninstall-clean";
+			default: return "Lark Link 用法：/lark setup | start | stop | restart | status | uninstall-clean";
 		}
 	};
-	registerCmd("lark-voice", "Feishu/Lark bridge — usage: /lark-voice setup|start|stop|restart|status|uninstall-clean", async (rawInput) => runLarkSubcommand((rawInput.trim().split(/\s+/)[0] ?? "").toLowerCase()), "setup|start|stop|restart|status|uninstall-clean");
+	registerCmd("lark-plus", "Feishu/Lark bridge — usage: /lark setup|start|stop|restart|status|uninstall-clean", async (rawInput) => runLarkSubcommand((rawInput.trim().split(/\s+/)[0] ?? "").toLowerCase()), "setup|start|stop|restart|status|uninstall-clean");
 	/**
 	* Locate the DSH session log for a bridge session id. Persisted logs live
 	* at <DSH_HOME>/sessions/<workspace-dir>/<encoded-session-id>/session.jsonl.zstd
 	* where ":" encodes as "~003A" — scan every workspace dir for the match.
 	*/
-	/** Scan ~/.dsh/sessions for the most recently written lark-voice session id. */
+	/** Scan ~/.dsh/sessions for the most recently written lark-plus session id. */
 	const findLatestLarkSessionId = () => {
 		const sessionsRoot = join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "sessions");
 		if (!existsSync(sessionsRoot)) return void 0;
@@ -6509,7 +6910,7 @@ function apply(ctx, rawConfig) {
 				continue;
 			}
 			for (const name of entries) {
-				if (!name.includes("lark-voice")) continue;
+				if (!name.includes("lark-plus")) continue;
 				const sessionDir = join(wsPath, name);
 				const zstd = join(sessionDir, "session.jsonl.zstd");
 				if (!existsSync(zstd)) continue;
@@ -6592,7 +6993,7 @@ function apply(ctx, rawConfig) {
 			}
 			files.push({
 				name: "ISSUE.md",
-				data: Buffer.from(`# dsh-lark-voice 诊断包\n\n${diagText}\n\n${issueMd}\n`, "utf8")
+				data: Buffer.from(`# dsh-lark-plus 诊断包\n\n${diagText}\n\n${issueMd}\n`, "utf8")
 			});
 			files.push({
 				name: "README.txt",
@@ -6627,7 +7028,7 @@ function apply(ctx, rawConfig) {
 				appSecret: envSecret,
 				domain: envDomain
 			});
-			return `凭据已保存（env 手动，appId=${maskId(envAppId)}，domain=${envDomain}）。运行 /lark-voice start 启动。`;
+			return `凭据已保存（env 手动，appId=${maskId(envAppId)}，domain=${envDomain}）。运行 /lark start 启动。`;
 		}
 		let qrInfo;
 		(async () => {
@@ -6667,12 +7068,12 @@ function apply(ctx, rawConfig) {
 		})();
 		const deadline = Date.now() + 3e4;
 		while (!qrInfo && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
-		if (!qrInfo) return "扫码流程未在 30s 内就绪。可改用手动通道：设 DSH_LARK_APP_ID + DSH_LARK_APP_SECRET 后再 /lark-voice setup。";
+		if (!qrInfo) return "扫码流程未在 30s 内就绪。可改用手动通道：设 DSH_LARK_APP_ID + DSH_LARK_APP_SECRET 后再 /lark setup。";
 		console.log(`飞书授权二维码链接: ${qrInfo.url}（${qrInfo.expireIn} 秒后过期）`);
 		return [
 			"📱 飞书授权二维码已生成 —— 见左侧 🪶 Lark 面板（或终端），手机飞书扫码确认。",
 			"",
-			`二维码 ${qrInfo.expireIn} 秒后过期。扫码后凭据在后台写入，运行 /lark-voice start 启动。`,
+			`二维码 ${qrInfo.expireIn} 秒后过期。扫码后凭据在后台写入，运行 /lark start 启动。`,
 			`备用链接（手机浏览器打开）：${qrInfo.url}`,
 			"看不到二维码？终端也打印了；或用 DSH_LARK_APP_ID/SECRET 手动通道。"
 		].join("\n");
@@ -6704,7 +7105,7 @@ function apply(ctx, rawConfig) {
 				force: true
 			});
 		} catch {}
-		return `已清除凭据（ref=${ref}）并清理状态目录 ${dir}。重新使用请运行 /lark-voice setup。`;
+		return `已清除凭据（ref=${ref}）并清理状态目录 ${dir}。重新使用请运行 /lark setup。`;
 	};
 	try {
 		ctx.systemPrompt?.section?.({
@@ -6722,7 +7123,7 @@ function apply(ctx, rawConfig) {
 	ctx.effect(() => {
 		startBridge();
 		const stopMediaSweeper = startMediaSweeper({
-			mediaDir: join(getCfg().attachments.dir.trim() || join(tmpdir(), "dsh-lark-voice", "inbound"), "media"),
+			mediaDir: join(getCfg().attachments.dir.trim() || join(tmpdir(), "dsh-lark-plus", "inbound"), "media"),
 			retentionHours: () => getCfg().attachments.retentionHours,
 			logger
 		});

@@ -324,8 +324,8 @@ export function permissionCard(current?: string): unknown {
  * - Stored preset badge per row; the CURRENT session is listed too but its
  *   button is disabled (users see where they are).
  * - Button op carries the session id URI-ENCODED — the card-action dispatcher
- *   splits op at the FIRST ":" and lark-voice session ids are full of colons
- *   (`lark-voice:dm:oc_x:nonce:0`); an unencoded id would lose its prefix and
+ *   splits op at the FIRST ":" and lark-plus session ids are full of colons
+ *   (`lark-plus:dm:oc_x:nonce:0`); an unencoded id would lose its prefix and
  *   the click would resolve to 未找到会话.
  */
 export function resumeCard(
@@ -422,7 +422,7 @@ export function helpCard(): unknown {
 			"- `/doctor` 生成诊断包（含 session log）",
 			"- `/model` 查看/切换模型",
 			"- `/lark-config k=v` 热改配置（嵌套键如 `streaming.enabled=true`）",
-			"- `/lark-voice setup|start|stop|status` 桥接管理",
+			"- `/lark setup|start|stop|status` 桥接管理",
 			"- `/goal` 等 DSH 命令原样执行",
 			"- skill 无需前缀：直接说任务（如「用 X skill 做 Y」）",
 		].join("\n"),
@@ -466,15 +466,11 @@ export function commandPanelCard(): unknown {
 					tag: "markdown",
 					content: "**命令面板**\n点击按钮一键执行，或直接输入文字聊天：",
 				},
-				button("桥接状态", { op: "status" }),
-				button("停止任务", { op: "stop" }),
-				button("工作区", { op: "workspace" }),
-				button("诊断包", { op: "doctor" }),
-				button("配置", { op: "lark-config" }),
+				...commandPanelButtons(),
 				{
 					tag: "markdown",
 					content:
-						"文本命令：`/status` `/mode` `/permission` `/workspace` `/stop` `/doctor` `/help`\n\n`/goal` 等 DSH 命令原样执行；skill 无需前缀，直接描述任务即可。",
+						"文本命令：`/status` `/new` `/sessions` `/resume` `/mode` `/permission` `/workspace` `/stop` `/doctor` `/help`\n\n`/goal` 等 DSH 命令原样执行；skill 无需前缀，直接描述任务即可。",
 				},
 			],
 		},
@@ -519,4 +515,46 @@ export function errorCard(message: string): unknown {
 
 export const CARD_MESSAGE_TYPE = "interactive";
 
+/**
+ * Buttons of the command panel: BARE command names as ops — the card-action
+ * dispatcher forwards unhandled ops to the bridge handler, so a tap is
+ * identical to typing the command. This is what makes the commands
+ * discoverable without configuring Feishu's own per-application "/" menu.
+ */
+export function commandPanelButtons(): unknown[] {
+	return [
+		button("桥接状态", { op: "status" }),
+		button("新会话", { op: "new" }),
+		button("历史会话", { op: "sessions" }),
+		button("停止任务", { op: "stop" }),
+		button("模式", { op: "mode" }),
+		button("权限", { op: "permission" }),
+		button("模型", { op: "model" }),
+		button("诊断包", { op: "doctor" }),
+		button("配置", { op: "lark-config" }),
+		button("帮助", { op: "help" }),
+	];
+}
+
+/**
+ * The "where am I" block /status appends: the CURRENT session of this chat,
+ * its workspace/mode/model, and how to move to another one. Until now only
+ * the Web UI could answer that question.
+ */
+export function sessionStatusBlock(info: {
+	sessionId?: string;
+	title?: string;
+	workspace?: string;
+	preset?: string;
+	model?: string;
+}): string {
+	const out = ["**当前会话**"];
+	out.push("- 会话 ID：" + "`" + (info.sessionId ?? "（尚未建立，下一条消息创建）") + "`");
+	if (info.title) out.push("- 标题：" + info.title.slice(0, 48));
+	if (info.workspace) out.push("- 工作区：" + info.workspace);
+	if (info.preset) out.push("- 模式：" + info.preset);
+	if (info.model) out.push("- 模型：" + info.model);
+	out.push("- 切换会话：`/sessions` 看历史（点按钮或 `/resume <序号>`）；新起一条：`/new`。");
+	return out.join("\n");
+}
 export * from "./task-cards.ts";

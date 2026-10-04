@@ -17,7 +17,7 @@ export interface QuotaGovernor {
   remaining(): number;
   /** When the quarantine lifts (epoch ms), if tripped. */
   resetAt(): number | undefined;
-  /** Forget history (e.g. after an explicit /lark-voice restart with user intent). */
+  /** Forget history (e.g. after an explicit /lark restart with user intent). */
   reset(): void;
 }
 
