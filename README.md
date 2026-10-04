@@ -51,7 +51,7 @@
 | 🛡 **连接自愈** | probe 驱动受控重连 + 配额熔断 + 断连补偿；环境代理自动规避 |
 | 🔀 **命令三级分流** | 桥特有命令桥处理；DSH 注册命令原生执行；其余原样注入 Agent |
 | 📎 **入站多媒体** | 飞书图片 → 视觉模型看图；文件 → 有界文本提取；**语音 → 本地转写** |
-| 📤 **出站多媒体** | 模型经 `lark_send_local_file` 主动回传本地图片/文件 |
+| 📤 **出站多媒体** | 模型经 `lark_plus_send_local_file` 主动回传本地图片/文件 |
 | 🩺 **一键诊断** | `/doctor` → **ZIP 诊断包**（含当前会话 session log + 脱敏配置） |
 | ✍️ **Markdown 渲染** | 回复自动检测 markdown → **CardKit 卡片**渲染，纯文本走文本消息 |
 | 🌊 **可选流式输出** | `/lark-config streaming.enabled=true` 热开流式卡片（默认关，省流量） |
@@ -100,7 +100,7 @@ dsh plugin --profile <你的档> add link:/path/to/dsh-lark-plus
 ```
 
 - **引擎**：SenseVoice（int8，中/英/日/韩/粤 + 自动标点），通过 `sherpa-onnx-node` 在本机 CPU 上跑。
-- **音频去向**：只有一次联网——首次使用时下载约 230 MB 的模型。之后完全离线。
+- **音频去向**：只有一次联网 —— 下载约 228 MB 的模型。**下载不在插件装载时触发**（安装 / 激活 / 启动永远秒级）：第一次收到语音消息、或在侧栏面板点「下载模型」、或调用 `POST /dsh-voice-local/v1/model/download` 时才开始。之后完全离线。
 - **失败不丢消息**：模型没下好、ffmpeg 缺失、解码失败时，音频照样落盘，正文留空并把原因写进日志。同一条语音永远不会因为转写失败而消失。
 - **可关**：配置里 `voice.enabled: false` 就只保留音频、不做转写。
 - **可回放**：DSH Web UI 里每条语音正文下面直接有一条播放条（宿主只读路由
@@ -111,7 +111,7 @@ dsh plugin --profile <你的档> add link:/path/to/dsh-lark-plus
 | 依赖 | 说明 |
 |:--|:--|
 | **ffmpeg** | 必须。飞书语音是 OGG/Opus，模型只吃 16 kHz WAV。默认按 PATH 查找，也认 `voice.ffmpegPath` / `DSH_VOICE_FFMPEG`。 |
-| **模型** | 首次自动下载到 `$DSH_HOME/voice/sensevoice/`（默认 `~/.dsh/voice/sensevoice/`），**与 `dsh-voice-local` 共用同一目录**——已经装过那个插件的话不会重复下载。 |
+| **模型** | 装载时**不会**下载；首次需要转写时（或手动点「下载模型」/ 调 `POST /dsh-voice-local/v1/model/download`）才下到 `$DSH_HOME/voice/sensevoice/`（默认 `~/.dsh/voice/sensevoice/`），**与 `dsh-voice-local` 共用同一目录**——装过那个插件、或已手动放置模型，都不会重复下载。可用 `voice.sha256` / `voice.modelSha256` / `voice.tokensSha256` 做完整性校验。 |
 
 手动放置模型（内网 / 下载慢时）：解压官方归档，保证目录里有 `model.int8.onnx` 和 `tokens.txt` 即可：
 
@@ -134,7 +134,11 @@ tar -xjf sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2 \
       modelDir: ''        # 空 = $DSH_HOME/voice/sensevoice
       ffmpegPath: ''      # 空 = 自动探测
       modelUrl: ''        # 主下载源覆盖
-      mirrors: ''         # 逗号分隔，优先于内置镜像（hf-mirror / ghfast / gh-proxy）
+      mirrors: ''         # 逗号分隔，优先于内置镜像（hf-mirror / ghfast）
+      sha256: ''          # 可选：模型归档 tar.bz2 的 SHA-256
+      modelSha256: ''     # 可选：model.int8.onnx 的 SHA-256（直连文件源）
+      tokensSha256: ''    # 可选：tokens.txt 的 SHA-256
+      timeoutMs: 600000   # 可选：单次下载尝试上限（默认 10 分钟）；慢源失败即换下一个
       ffmpegTimeoutMs: 60000
 ```
 
@@ -266,7 +270,7 @@ MIT — 自由使用、修改、分发。
 | 🛡 **Self-healing connection** | Probe-driven controlled reconnect + QuotaGovernor circuit breaker (auto-unblocks and reconnects after the quota window) + missed-message compensation; auto-avoids proxy env |
 | 🔀 **3-tier command routing** | Bridge commands → bridge; DSH commands → native; `/goal`, unknown `/xxx`, plain text → injected verbatim (no gates). **Skills need no prefix** — just describe the task |
 | 📎 **Inbound media** | Feishu images → **visual model** (attachment-backed); files → bounded text extraction |
-| 📤 **Outbound media** | Model sends local files/images via `lark_send_local_file` (workspace whitelist + size/format checks) |
+| 📤 **Outbound media** | Model sends local files/images via `lark_plus_send_local_file` (workspace whitelist + size/format checks) |
 | 🩺 **One-click diagnostics** | `/doctor` → **ZIP bundle** (full DSH session log + sanitized config + ISSUE.md) back to the chat |
 | ✍️ **Markdown rendering** | Replies auto-render as CardKit cards (headings/lists/code/tables); plain text stays plain |
 | 🌊 **Optional streaming** | `/lark-config streaming.enabled=true` hot-enables CardKit schema 2.0 streaming cards (off by default, saves traffic) |

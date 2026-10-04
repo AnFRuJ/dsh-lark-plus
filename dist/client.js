@@ -158,18 +158,25 @@ window.__ModuleLoader__.load({
 				const [st, setSt] = useState(void 0);
 				const [qrTs, setQrTs] = useState(0);
 				const [qrLoaded, setQrLoaded] = useState(false);
+				const [mdl, setMdl] = useState(void 0);
 				useEffect(() => {
 					if (!open) return;
 					const origin = win.location?.origin ?? "";
 					const fetchStatus = () => {
 						win.fetch?.(`${origin}/plugins/lark-plus/status`).then((r) => r.ok ? r.json() : Promise.reject(/* @__PURE__ */ new Error("status"))).then((j) => setSt(j)).catch(() => setSt((prev) => prev));
 					};
+					const fetchModel = () => {
+						win.fetch?.(`${origin}/dsh-voice-local/v1/model/status`).then((r) => r.ok ? r.json() : Promise.reject(/* @__PURE__ */ new Error("model"))).then((j) => setMdl(j)).catch(() => setMdl((prev) => prev));
+					};
 					fetchStatus();
+					fetchModel();
 					const stId = setInterval(fetchStatus, 3e3);
+					const mdlId = setInterval(fetchModel, 3e3);
 					const qrId = setInterval(() => setQrTs(Date.now()), 4e3);
 					setQrTs(Date.now());
 					return () => {
 						clearInterval(stId);
+						clearInterval(mdlId);
 						clearInterval(qrId);
 					};
 				}, [open]);
@@ -227,6 +234,47 @@ window.__ModuleLoader__.load({
 					marginBottom: "10px",
 					whiteSpace: "pre-wrap"
 				} }, view.hint) : null;
+				const dl = mdl?.download ?? {};
+				const dlGot = Number(dl.receivedBytes) || 0;
+				const dlTotal = Number(dl.totalBytes) || 0;
+				const mb = (n) => (n / 1048576).toFixed(1);
+				const startModelDownload = () => {
+					win.fetch?.(`${origin}/dsh-voice-local/v1/model/download`, { method: "POST" }).then(() => {
+						win.fetch?.(`${origin}/dsh-voice-local/v1/model/status`).then((r) => r.ok ? r.json() : Promise.reject(/* @__PURE__ */ new Error("model"))).then((j) => setMdl(j)).catch(() => void 0);
+					}).catch(() => void 0);
+				};
+				const modelLine = (text) => h("div", { style: {
+					opacity: .75,
+					fontSize: "11px",
+					marginTop: "4px"
+				} }, text);
+				const modelSection = mdl === void 0 ? null : mdl.ready ? h("div", { style: {
+					opacity: .7,
+					marginBottom: "10px",
+					fontSize: "11px"
+				} }, "🎙 语音模型已就绪（离线）") : h("div", { style: {
+					marginBottom: "10px",
+					padding: "8px 10px",
+					background: "rgba(255,255,255,.05)",
+					borderRadius: "8px"
+				} }, h("div", { style: {
+					display: "flex",
+					alignItems: "center",
+					gap: "8px"
+				} }, h("span", null, dl.running ? "语音模型下载中…" : "语音模型未就绪 · 约 228 MB"), dl.running ? null : h("button", {
+					type: "button",
+					onClick: startModelDownload,
+					style: {
+						marginLeft: "auto",
+						padding: "4px 10px",
+						border: "1px solid rgba(127,127,127,.35)",
+						borderRadius: "6px",
+						background: "transparent",
+						color: "inherit",
+						cursor: "pointer",
+						fontSize: "11px"
+					}
+				}, "下载模型")), dl.running && dlTotal > 0 ? modelLine(`已下载 ${mb(dlGot)} / ${mb(dlTotal)} MB`) : null, dl.error ? modelLine(`下载失败：${String(dl.error)}`) : null);
 				const qrImg = showQr ? h("img", {
 					src: `${origin}/plugins/lark-plus/qr?t=${qrTs}`,
 					alt: "Lark Plus setup QR",
@@ -286,7 +334,7 @@ window.__ModuleLoader__.load({
 						lineHeight: 1
 					},
 					title: "关闭"
-				}, "×")), banner, hint, qrImg, qrHint, footer);
+				}, "×")), banner, hint, modelSection, qrImg, qrHint, footer);
 				return h("div", null, button, portalToBody(panel));
 			};
 			ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({

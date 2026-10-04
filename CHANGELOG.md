@@ -6,6 +6,35 @@
 > offline voice-message transcription. Entries below `0.1.0` describe the
 > upstream history that this fork inherits.
 
+## 0.1.3 — 2026-10-04
+
+### 变更
+- **装载期不再预下载语音模型（重要）**：`apply()` 里「模型未就绪就 `startDownload()`」那句已删除。
+  模型约 228 MB，过去只要插件被装载（安装 / 激活 / 重启）就会立刻开始下载 —— 在慢镜像上足以把
+  「装插件」变成几分钟的转圈，而用户在 `applying` 阶段退出会让 DSH 把这次安装整体回滚（装了个寂寞）。
+  现在下载只发生在这三种时机：
+  1. 第一次真的收到语音消息、转写时发现模型缺失；
+  2. 侧栏 🪶 Lark Plus 面板里的「下载模型」按钮；
+  3. `POST /dsh-voice-local/v1/model/download`。
+  安装 / 激活 / 启动因此始终是秒级。
+- **默认镜像去掉 `gh-proxy.com`**：实测（大陆线路）hf-mirror 0.9~3.4 MB/s、ghfast.top ~94 KB/s、
+  gh-proxy.com ~41 KB/s —— 228 MB 走最后一个要约 95 分钟，观感等同卡死。需要时用 `voice.mirrors` 加回。
+- **新增单次尝试超时** `voice.timeoutMs`（默认 600000ms = 10 分钟；环境变量 `DSH_VOICE_TIMEOUT_MS`）：
+  慢源失败即退出并换下一个，不再无限挂住。
+- **新增可选完整性校验**：`voice.sha256`（模型归档）、`voice.modelSha256`（直连 `model.int8.onnx`）、
+  `voice.tokensSha256`（`tokens.txt`）；环境变量 `DSH_VOICE_MODEL_SHA256` /
+  `DSH_VOICE_MODEL_FILE_SHA256` / `DSH_VOICE_TOKENS_SHA256`。不配则跳过；校验用流式计算，不把
+  228 MB 读进内存；不匹配即判定该源失败并换下一个。
+- **客户端面板显示语音模型状态**：未就绪时显示「语音模型未就绪 · 约 228 MB」+「下载模型」按钮；
+  下载中显示进度；失败显示原因；就绪时显示「🎙 语音模型已就绪（离线）」。
+
+### 修复
+- **与 `dsh-lark-link` 同档共存时插件激活失败**：两者都注册同名工具
+  `lark_send_local_file` / `lark_config_get`，同档装载时第二个抛
+  `tool "…" is already registered`，整个 entry 激活失败（表现为该插件静默不工作）。工具已改名：
+  `lark_plus_send_local_file` / `lark_plus_config_get`，`/doctor` 帮助文本与 README 同步更新。
+  **破坏性变更**：旧工具名不再注册。
+
 ## 0.1.2 — 2026-10-04
 
 ### 修复

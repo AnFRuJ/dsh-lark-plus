@@ -3,9 +3,9 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 import { basename, dirname, isAbsolute, join, relative, resolve, win32 } from "node:path";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { gzipSync, zstdDecompressSync } from "node:zlib";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as qrcode from "qrcode-terminal";
 import QRCode from "qrcode";
 import { homedir, tmpdir } from "node:os";
@@ -3170,6 +3170,16 @@ function redactSecrets(input, secrets) {
 }
 //#endregion
 //#region src/application/diagnostics-service.ts
+/** Version of the shipped package, read from its own package.json so the
+*  diagnostic bundle cannot drift from the released version. */
+function pluginVersion() {
+	try {
+		const pkg = createRequire(import.meta.url)("../package.json");
+		return typeof pkg.version === "string" ? pkg.version : "unknown";
+	} catch {
+		return "unknown";
+	}
+}
 function createDiagnosticsService(deps) {
 	return { async build() {
 		const s = deps.ctx.status.get();
@@ -3198,7 +3208,7 @@ function createDiagnosticsService(deps) {
 			"```",
 			"",
 			"## 环境",
-			"- dsh-lark-plus: 0.1.0",
+			`- dsh-lark-plus: ${pluginVersion()}`,
 			"- Node: " + process.version
 		].join("\n");
 		return {
@@ -4833,7 +4843,7 @@ function resolveWorkspaceTarget(arg, curWs) {
 	return resolve(expanded);
 }
 /**
-* Resolve a file path for the lark_send_local_file tool and check that it
+* Resolve a file path for the lark_plus_send_local_file tool and check that it
 * stays inside the workspace root (GH #7).
 * Returns { abs, ok } — ok=false means the path escapes the workspace and
 * must be rejected (拒绝: 路径不在工作区内).
@@ -4945,13 +4955,18 @@ function readWavSamples(input, targetSampleRate = DEFAULT_TARGET_SAMPLE_RATE) {
 //#region src/voice/transcribe.ts
 /** 16 kHz mono is what SenseVoice expects. */
 const TARGET_SAMPLE_RATE = 16e3;
-/** Mirrors tried in order when the primary URL fails (mainland networks). */
-const DEFAULT_MIRRORS = [
-	"https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx",
-	"https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
-	"https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"
-];
+/**
+* Mirrors tried in order when the primary URL fails (mainland networks).
+* Measured on a mainland line: hf-mirror 0.9–3.4 MB/s, ghfast.top ~94 KB/s,
+* gh-proxy.com ~41 KB/s — a 228 MB model over the last one takes ~95 min,
+* long enough that users read it as a hang, so it is no longer a default.
+* Re-add per deployment through `voice.mirrors` when a network needs it.
+*/
+const DEFAULT_MIRRORS = ["https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx", "https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2"];
 const MIRROR_TOKENS_URL = "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt";
+/** Per-attempt download bound (voice.timeoutMs). A source that stalls fails
+*  out so the next one can try, instead of holding the whole download open. */
+const DEFAULT_DOWNLOAD_TIMEOUT_MS = 6e5;
 const require_ = createRequire(import.meta.url);
 /** Resolve the model directory using the same convention as dsh-voice-local,
 *  so an already-downloaded model is shared instead of fetched twice. */
@@ -5151,8 +5166,12 @@ let downloadState = {
 function getDownloadState() {
 	return { ...downloadState };
 }
-async function fetchToFile(url, dest, onBytes) {
-	const res = await fetch(url, { redirect: "follow" });
+async function fetchToFile(url, dest, onBytes, timeoutMs) {
+	const ms = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_DOWNLOAD_TIMEOUT_MS;
+	const res = await fetch(url, {
+		redirect: "follow",
+		signal: AbortSignal.timeout(ms)
+	});
 	if (!res.ok || !res.body) throw new Error("HTTP " + res.status + " " + url);
 	downloadState.totalBytes = Number(res.headers.get("content-length") ?? 0) || null;
 	const chunks = [];
@@ -5164,6 +5183,20 @@ async function fetchToFile(url, dest, onBytes) {
 	}
 	writeFileSync(dest, Buffer.concat(chunks));
 	return received;
+}
+/** SHA-256 of a file, streamed so a 228 MB model never lands in memory. */
+async function sha256OfFile(path) {
+	const hash = createHash("sha256");
+	for await (const chunk of createReadStream(path)) hash.update(chunk);
+	return hash.digest("hex");
+}
+/** Verify a downloaded file against an expected digest: an empty expectation
+*  skips the check, a mismatch throws so the next source gets a turn. */
+async function assertSha256(path, expected, label) {
+	const want = typeof expected === "string" ? expected.trim().toLowerCase() : "";
+	if (want === "") return;
+	const got = await sha256OfFile(path);
+	if (got !== want) throw new Error(`${label} SHA-256 不匹配（期望 ${want}，实际 ${got}）`);
 }
 /**
 * Download + install the SenseVoice model into dir. Idempotent (a ready
@@ -5205,14 +5238,17 @@ async function downloadModel(dir, opts = {}) {
 		].filter((u) => typeof u === "string" && u !== "");
 		let installed = false;
 		let lastError = "";
+		const timeoutMs = opts.timeoutMs;
 		for (const url of urls) try {
 			if (/\.onnx(\?|$)/i.test(url)) {
 				const modelOut = join(tmp, "model.int8.onnx");
 				await fetchToFile(url, modelOut, (n) => {
 					downloadState.receivedBytes = n;
-				});
+				}, timeoutMs);
+				await assertSha256(modelOut, opts.modelSha256, "model.int8.onnx");
 				const tokensOut = join(tmp, "tokens.txt");
-				await fetchToFile(MIRROR_TOKENS_URL, tokensOut, () => {});
+				await fetchToFile(MIRROR_TOKENS_URL, tokensOut, () => {}, timeoutMs);
+				await assertSha256(tokensOut, opts.tokensSha256, "tokens.txt");
 				renameSync(modelOut, modelFiles(dir).model);
 				renameSync(tokensOut, modelFiles(dir).tokens);
 				installed = true;
@@ -5220,7 +5256,8 @@ async function downloadModel(dir, opts = {}) {
 				const archive = join(tmp, basename(new URL(url).pathname) || "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2");
 				await fetchToFile(url, archive, (n) => {
 					downloadState.receivedBytes = n;
-				});
+				}, timeoutMs);
+				await assertSha256(archive, opts.sha256, "模型归档");
 				downloadState.phase = "extract";
 				const extractDir = join(tmp, "extract");
 				mkdirSync(extractDir, { recursive: true });
@@ -5265,7 +5302,9 @@ async function downloadModel(dir, opts = {}) {
 		});
 	}
 }
-/** Fire-and-forget download used on first contact (never blocks a turn). */
+/** Fire-and-forget download (never blocks a turn). Callers start it when a
+*  voice message actually needs the model, or from the explicit download
+*  route — never from plugin load, so activation stays cheap. */
 function startModelDownload(dir, opts = {}) {
 	downloadModel(dir, opts);
 }
@@ -5445,6 +5484,10 @@ function voiceOptionsFrom(cfg) {
 		ffmpegPath: pick(v?.ffmpegPath, process.env.DSH_VOICE_FFMPEG),
 		modelUrl: pick(v?.modelUrl, process.env.DSH_VOICE_MODEL_URL),
 		mirrors: v?.mirrors,
+		sha256: pick(v?.sha256, process.env.DSH_VOICE_MODEL_SHA256),
+		modelSha256: pick(v?.modelSha256, process.env.DSH_VOICE_MODEL_FILE_SHA256),
+		tokensSha256: pick(v?.tokensSha256, process.env.DSH_VOICE_TOKENS_SHA256),
+		timeoutMs: v?.timeoutMs ?? (Number(process.env.DSH_VOICE_TIMEOUT_MS) || void 0),
 		ffmpegTimeoutMs: v?.ffmpegTimeoutMs
 	};
 }
@@ -5800,7 +5843,6 @@ function apply(ctx, rawConfig) {
 		warn: (m) => logger.warn(m),
 		info: (m) => logger.info(m)
 	}, voiceOptions);
-	if (voiceEnabled && !voice.ready()) voice.startDownload();
 	const bridge = createBridgeContext({
 		logger,
 		cfg: getCfg,
@@ -6890,7 +6932,7 @@ function apply(ctx, rawConfig) {
 		logger.info("bridge stopped");
 	};
 	ctx.tools.register(defineTool({
-		name: "lark_send_local_file",
+		name: "lark_plus_send_local_file",
 		description: "Send a local file or image to the current Feishu chat.",
 		parameters: {
 			path: {
@@ -6949,7 +6991,7 @@ function apply(ctx, rawConfig) {
 		}
 	}));
 	ctx.tools.register(defineTool({
-		name: "lark_config_get",
+		name: "lark_plus_config_get",
 		description: "Read bridge config (hot-reloadable keys).",
 		parameters: {},
 		output: {
@@ -7220,7 +7262,7 @@ function apply(ctx, rawConfig) {
 				role: "system",
 				content: [
 					"你正在通过飞书/Lark 桥接与用户对话。",
-					"可用工具: lark_send_local_file（发送本地文件到当前飞书会话）、lark_config_get（读取桥配置）。",
+					"可用工具: lark_plus_send_local_file（发送本地文件到当前飞书会话）、lark_plus_config_get（读取桥配置）。",
 					"回复要简洁；长输出会自动流式呈现给用户。"
 				].join("\n")
 			})

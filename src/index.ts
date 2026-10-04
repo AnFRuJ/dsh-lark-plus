@@ -2,7 +2,7 @@
 // Registers:
 //   - bridge lifecycle (ctx.effect disposer → clean teardown on unload)
 //   - /lark-* commands (ctx.commands)
-//   - lark_send_local_file / lark_config_get tools (ctx.tools)
+//   - lark_plus_send_local_file / lark_plus_config_get tools (ctx.tools)
 //   - system-prompt section telling the model it's bridged
 //   - session/event fan-out → event-forwarder (streaming + durable outbox)
 // The heavy logic lives in the layered modules; this file only wires them
@@ -149,6 +149,15 @@ export interface LarkLinkConfig {
 		modelUrl?: string;
 		/** Comma-separated mirror list tried before the built-in ones. */
 		mirrors?: string;
+		/** SHA-256 of the model archive (tar.bz2 sources). Optional: unset = no check. */
+		sha256?: string;
+		/** SHA-256 of model.int8.onnx (direct-file sources). Optional. */
+		modelSha256?: string;
+		/** SHA-256 of tokens.txt. Optional. */
+		tokensSha256?: string;
+		/** Per-attempt download bound, ms (default 600000). A source that stalls
+		 *  fails out instead of holding the whole download open. */
+		timeoutMs?: number;
 		/** Transcode timeout, ms. */
 		ffmpegTimeoutMs?: number;
 	};
@@ -167,6 +176,10 @@ function voiceOptionsFrom(cfg: LarkLinkConfig | undefined): import("./voice/tran
 		ffmpegPath: pick(v?.ffmpegPath, process.env.DSH_VOICE_FFMPEG),
 		modelUrl: pick(v?.modelUrl, process.env.DSH_VOICE_MODEL_URL),
 		mirrors: v?.mirrors,
+		sha256: pick(v?.sha256, process.env.DSH_VOICE_MODEL_SHA256),
+		modelSha256: pick(v?.modelSha256, process.env.DSH_VOICE_MODEL_FILE_SHA256),
+		tokensSha256: pick(v?.tokensSha256, process.env.DSH_VOICE_TOKENS_SHA256),
+		timeoutMs: v?.timeoutMs ?? (Number(process.env.DSH_VOICE_TIMEOUT_MS) || undefined),
 		ffmpegTimeoutMs: v?.ffmpegTimeoutMs,
 	};
 }
@@ -666,11 +679,13 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		{ warn: (m) => logger.warn(m), info: (m) => logger.info(m) },
 		voiceOptions,
 	);
-	if (voiceEnabled && !voice.ready()) {
-		// First contact: fetch the model in the background so the first voice
-		// message after a restart is already fast.
-		voice.startDownload();
-	}
+	// Deliberately NO model download at load. The model is ~228 MB: fetching it
+	// while the plugin mounts turns "install / activate / start" into a
+	// minutes-long event, and over a slow mirror it reads as a hang. The
+	// download now starts on first real use (the message handler notices a
+	// missing model) or from the explicit
+	// POST /dsh-voice-local/v1/model/download route — both surfaced in the
+	// sidebar panel.
 
 	// ---- bridge context (getters — never snapshots) --------------------------
 	const bridge = createBridgeContext({
@@ -2455,7 +2470,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	// ---- tools ------------------------------------------------------------------
 	ctx.tools.register(
 		defineTool({
-			name: "lark_send_local_file",
+			name: "lark_plus_send_local_file",
 			description: "Send a local file or image to the current Feishu chat.",
 			parameters: {
 				path: {
@@ -2554,7 +2569,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 	);
 	ctx.tools.register(
 		defineTool({
-			name: "lark_config_get",
+			name: "lark_plus_config_get",
 			description: "Read bridge config (hot-reloadable keys).",
 			parameters: {},
 			output: {
@@ -2984,7 +2999,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				role: "system",
 				content: [
 					"你正在通过飞书/Lark 桥接与用户对话。",
-					"可用工具: lark_send_local_file（发送本地文件到当前飞书会话）、lark_config_get（读取桥配置）。",
+					"可用工具: lark_plus_send_local_file（发送本地文件到当前飞书会话）、lark_plus_config_get（读取桥配置）。",
 					"回复要简洁；长输出会自动流式呈现给用户。",
 				].join("\n"),
 			}),

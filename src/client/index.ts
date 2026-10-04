@@ -43,7 +43,10 @@ const reactDom = require("react-dom") as {
 
 const win = globalThis as unknown as {
 	location?: { origin?: string };
-	fetch?: (url: string) => Promise<{ ok: boolean; json(): Promise<unknown> }>;
+	fetch?: (
+		url: string,
+		init?: { method?: string },
+	) => Promise<{ ok: boolean; json(): Promise<unknown> }>;
 	// Browser-only, used as the portal mount target. Kept out of the TS dom lib
 	// (this package's lib is ES2023); accessed lazily through globalThis.
 	document?: { body?: unknown } | null;
@@ -100,6 +103,19 @@ interface StatusPayload {
 	outboxPending?: number;
 	outboxFailed?: number;
 	inboundFailed?: number;
+}
+
+/** Shape of GET /dsh-voice-local/v1/model/status (the host voice route). */
+interface ModelStatus {
+	ready?: boolean;
+	modelDir?: string;
+	download?: {
+		running?: boolean;
+		phase?: string;
+		receivedBytes?: number;
+		totalBytes?: number | null;
+		error?: string;
+	};
 }
 
 type PanelState =
@@ -286,6 +302,7 @@ export function apply(ctx: ClientContext): void {
 		const [st, setSt] = useState<StatusPayload | undefined>(undefined);
 		const [qrTs, setQrTs] = useState<number>(0);
 		const [qrLoaded, setQrLoaded] = useState<boolean>(false);
+		const [mdl, setMdl] = useState<ModelStatus | undefined>(undefined);
 
 		useEffect(() => {
 			if (!open) return;
@@ -297,13 +314,26 @@ export function apply(ctx: ClientContext): void {
 					.then((j) => setSt(j as StatusPayload))
 					.catch(() => setSt((prev) => prev));
 			};
+			// The voice model is ~228 MB and is deliberately NOT fetched at
+			// plugin load any more, so this panel is where the user sees it
+			// missing and starts the download on purpose.
+			const fetchModel = (): void => {
+				void win
+					.fetch?.(`${origin}/dsh-voice-local/v1/model/status`)
+					.then((r) => (r.ok ? r.json() : Promise.reject(new Error("model"))))
+					.then((j) => setMdl(j as ModelStatus))
+					.catch(() => setMdl((prev) => prev));
+			};
 			fetchStatus();
+			fetchModel();
 			const stId = setInterval(fetchStatus, 3000);
+			const mdlId = setInterval(fetchModel, 3000);
 			// QR only matters in the setup state; poll a fresh PNG while unconfigured.
 			const qrId = setInterval(() => setQrTs(Date.now()), 4000);
 			setQrTs(Date.now());
 			return () => {
 				clearInterval(stId);
+				clearInterval(mdlId);
 				clearInterval(qrId);
 			};
 		}, [open]);
@@ -403,6 +433,74 @@ export function apply(ctx: ClientContext): void {
 					view.hint,
 				)
 			: null;
+
+		const dl = mdl?.download ?? {};
+		const dlGot = Number(dl.receivedBytes) || 0;
+		const dlTotal = Number(dl.totalBytes) || 0;
+		const mb = (n: number): string => (n / 1048576).toFixed(1);
+		const startModelDownload = (): void => {
+			void win
+				.fetch?.(`${origin}/dsh-voice-local/v1/model/download`, { method: "POST" })
+				.then(() => {
+					void win
+						.fetch?.(`${origin}/dsh-voice-local/v1/model/status`)
+						.then((r) => (r.ok ? r.json() : Promise.reject(new Error("model"))))
+						.then((j) => setMdl(j as ModelStatus))
+						.catch(() => undefined);
+				})
+				.catch(() => undefined);
+		};
+		const modelLine = (text: string): unknown =>
+			h("div", { style: { opacity: 0.75, fontSize: "11px", marginTop: "4px" } }, text);
+		const modelSection: unknown =
+			mdl === undefined
+				? null
+				: mdl.ready
+					? h(
+							"div",
+							{ style: { opacity: 0.7, marginBottom: "10px", fontSize: "11px" } },
+							"🎙 语音模型已就绪（离线）",
+						)
+					: h(
+							"div",
+							{
+								style: {
+									marginBottom: "10px",
+									padding: "8px 10px",
+									background: "rgba(255,255,255,.05)",
+									borderRadius: "8px",
+								},
+							},
+							h(
+								"div",
+								{ style: { display: "flex", alignItems: "center", gap: "8px" } },
+								h("span", null, dl.running ? "语音模型下载中…" : "语音模型未就绪 · 约 228 MB"),
+								dl.running
+									? null
+									: h(
+											"button",
+											{
+												type: "button",
+												onClick: startModelDownload,
+												style: {
+													marginLeft: "auto",
+													padding: "4px 10px",
+													border: "1px solid rgba(127,127,127,.35)",
+													borderRadius: "6px",
+													background: "transparent",
+													color: "inherit",
+													cursor: "pointer",
+													fontSize: "11px",
+												},
+											},
+											"下载模型",
+										),
+							),
+							dl.running && dlTotal > 0
+								? modelLine(`已下载 ${mb(dlGot)} / ${mb(dlTotal)} MB`)
+								: null,
+							dl.error ? modelLine(`下载失败：${String(dl.error)}`) : null,
+						);
 
 		// QR only while unconfigured; hidden (but fetched) until it loads.
 		const qrImg = showQr
@@ -504,6 +602,7 @@ export function apply(ctx: ClientContext): void {
 			),
 			banner,
 			hint,
+			modelSection,
 			qrImg,
 			qrHint,
 			footer,

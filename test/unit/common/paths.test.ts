@@ -50,7 +50,7 @@ test("paths: UNC path is absolute", () => {
 	assert.ok(!t.startsWith("/cur/ws"), "UNC must not be joined under the cwd");
 });
 
-// ---- resolveInWorkspacePath (lark_send_local_file 工具) --------------------
+// ---- resolveInWorkspacePath (lark_plus_send_local_file 工具) --------------------
 
 test("paths: absolute input inside root resolves and passes containment", () => {
 	const { abs, ok } = resolveInWorkspacePath("/ws/a/b.txt", "/ws/a");

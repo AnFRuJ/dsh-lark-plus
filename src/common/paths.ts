@@ -1,6 +1,6 @@
 // Cross-platform workspace path resolution (GH #7).
 //
-// The /workspace command and the lark_send_local_file tool used to test
+// The /workspace command and the lark_plus_send_local_file tool used to test
 // absoluteness with `startsWith("/")` — a Unix-only heuristic. On Windows
 // every absolute path starts with a drive letter (`D:\…`) or a UNC share
 // (`\\server\…`), so the command rejected EVERY path with 无效路径 and the
@@ -43,7 +43,7 @@ export function resolveWorkspaceTarget(arg: string, curWs: string): string {
 }
 
 /**
- * Resolve a file path for the lark_send_local_file tool and check that it
+ * Resolve a file path for the lark_plus_send_local_file tool and check that it
  * stays inside the workspace root (GH #7).
  * Returns { abs, ok } — ok=false means the path escapes the workspace and
  * must be rejected (拒绝: 路径不在工作区内).

@@ -511,6 +511,14 @@ interface VoiceOptions {
   modelUrl?: string;
   /** Comma-separated mirror list override (config voice.mirrors). */
   mirrors?: string;
+  /** SHA-256 of the model ARCHIVE (tar.bz2 sources). Optional. */
+  sha256?: string;
+  /** SHA-256 of model.int8.onnx (direct-file sources). Optional. */
+  modelSha256?: string;
+  /** SHA-256 of tokens.txt. Optional. */
+  tokensSha256?: string;
+  /** Per-attempt download bound, ms. Default DEFAULT_DOWNLOAD_TIMEOUT_MS. */
+  timeoutMs?: number;
   /** Child process timeout for the transcode, ms. */
   ffmpegTimeoutMs?: number;
 }
@@ -661,6 +669,15 @@ interface LarkLinkConfig {
     modelUrl?: string;
     /** Comma-separated mirror list tried before the built-in ones. */
     mirrors?: string;
+    /** SHA-256 of the model archive (tar.bz2 sources). Optional: unset = no check. */
+    sha256?: string;
+    /** SHA-256 of model.int8.onnx (direct-file sources). Optional. */
+    modelSha256?: string;
+    /** SHA-256 of tokens.txt. Optional. */
+    tokensSha256?: string;
+    /** Per-attempt download bound, ms (default 600000). A source that stalls
+     *  fails out instead of holding the whole download open. */
+    timeoutMs?: number;
     /** Transcode timeout, ms. */
     ffmpegTimeoutMs?: number;
   };

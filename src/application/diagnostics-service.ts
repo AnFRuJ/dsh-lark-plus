@@ -2,8 +2,22 @@
 // `/lark doctor`). Masks secrets, hashes ids, includes config (redacted),
 // connection history, outbox stats, and a prefilled ISSUE.md. Harness-agnostic.
 
+import { createRequire } from "node:module";
+
 import type { BridgeContextRead } from "./bridge-context.ts";
 import { redactSecrets, statusDetailLines } from "./status-formatter.ts";
+
+/** Version of the shipped package, read from its own package.json so the
+ *  diagnostic bundle cannot drift from the released version. */
+function pluginVersion(): string {
+	try {
+		const require_ = createRequire(import.meta.url);
+		const pkg = require_("../package.json") as { version?: unknown };
+		return typeof pkg.version === "string" ? pkg.version : "unknown";
+	} catch {
+		return "unknown";
+	}
+}
 
 export interface DiagnosticsDeps {
   ctx: BridgeContextRead;
@@ -48,7 +62,7 @@ export function createDiagnosticsService(deps: DiagnosticsDeps): DiagnosticsServ
         "```",
         "",
         "## 环境",
-        "- dsh-lark-plus: 0.1.0",
+        `- dsh-lark-plus: ${pluginVersion()}`,
         "- Node: " + process.version,
       ].join("\n");
       return { text: lines.join("\n"), issueMd };

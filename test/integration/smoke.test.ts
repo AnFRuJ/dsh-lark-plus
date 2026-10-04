@@ -60,8 +60,8 @@ test("smoke: apply() registers tools/commands and effect disposer runs cleanly",
 
 	apply(ctx as never, ctx.config);
 	const toolNames = tools.map((t) => t.name);
-	assert.ok(toolNames.includes("lark_send_local_file"), "file tool registered");
-	assert.ok(toolNames.includes("lark_config_get"), "config tool registered");
+	assert.ok(toolNames.includes("lark_plus_send_local_file"), "file tool registered");
+	assert.ok(toolNames.includes("lark_plus_config_get"), "config tool registered");
 	const cmdNames = commands.map((c) => c.name);
 	assert.ok(
 		cmdNames.includes("lark-plus"),

@@ -11,7 +11,8 @@
 
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -26,14 +27,23 @@ export const DEFAULT_MODEL_URL =
 export const MODEL_ARCHIVE_NAME =
 	"sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2";
 
-/** Mirrors tried in order when the primary URL fails (mainland networks). */
+/**
+ * Mirrors tried in order when the primary URL fails (mainland networks).
+ * Measured on a mainland line: hf-mirror 0.9–3.4 MB/s, ghfast.top ~94 KB/s,
+ * gh-proxy.com ~41 KB/s — a 228 MB model over the last one takes ~95 min,
+ * long enough that users read it as a hang, so it is no longer a default.
+ * Re-add per deployment through `voice.mirrors` when a network needs it.
+ */
 export const DEFAULT_MIRRORS: readonly string[] = [
 	"https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx",
 	"https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
-	"https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
 ];
 export const MIRROR_TOKENS_URL =
 	"https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt";
+
+/** Per-attempt download bound (voice.timeoutMs). A source that stalls fails
+ *  out so the next one can try, instead of holding the whole download open. */
+export const DEFAULT_DOWNLOAD_TIMEOUT_MS = 600_000;
 
 export interface VoiceOptions {
 	/** Model directory override. Empty = $DSH_HOME/voice/sensevoice. */
@@ -44,6 +54,14 @@ export interface VoiceOptions {
 	modelUrl?: string;
 	/** Comma-separated mirror list override (config voice.mirrors). */
 	mirrors?: string;
+	/** SHA-256 of the model ARCHIVE (tar.bz2 sources). Optional. */
+	sha256?: string;
+	/** SHA-256 of model.int8.onnx (direct-file sources). Optional. */
+	modelSha256?: string;
+	/** SHA-256 of tokens.txt. Optional. */
+	tokensSha256?: string;
+	/** Per-attempt download bound, ms. Default DEFAULT_DOWNLOAD_TIMEOUT_MS. */
+	timeoutMs?: number;
 	/** Child process timeout for the transcode, ms. */
 	ffmpegTimeoutMs?: number;
 }
@@ -261,8 +279,17 @@ export function getDownloadState(): DownloadState {
 	return { ...downloadState };
 }
 
-async function fetchToFile(url: string, dest: string, onBytes: (n: number) => void): Promise<number> {
-	const res = await fetch(url, { redirect: "follow" });
+async function fetchToFile(
+	url: string,
+	dest: string,
+	onBytes: (n: number) => void,
+	timeoutMs?: number,
+): Promise<number> {
+	const ms =
+		typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+			? timeoutMs
+			: DEFAULT_DOWNLOAD_TIMEOUT_MS;
+	const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(ms) });
 	if (!res.ok || !res.body) throw new Error("HTTP " + res.status + " " + url);
 	downloadState.totalBytes = Number(res.headers.get("content-length") ?? 0) || null;
 	const chunks: Uint8Array[] = [];
@@ -274,6 +301,22 @@ async function fetchToFile(url: string, dest: string, onBytes: (n: number) => vo
 	}
 	writeFileSync(dest, Buffer.concat(chunks));
 	return received;
+}
+
+/** SHA-256 of a file, streamed so a 228 MB model never lands in memory. */
+async function sha256OfFile(path: string): Promise<string> {
+	const hash = createHash("sha256");
+	for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+	return hash.digest("hex");
+}
+
+/** Verify a downloaded file against an expected digest: an empty expectation
+ *  skips the check, a mismatch throws so the next source gets a turn. */
+async function assertSha256(path: string, expected: string | undefined, label: string): Promise<void> {
+	const want = typeof expected === "string" ? expected.trim().toLowerCase() : "";
+	if (want === "") return;
+	const got = await sha256OfFile(path);
+	if (got !== want) throw new Error(`${label} SHA-256 不匹配（期望 ${want}，实际 ${got}）`);
 }
 
 /**
@@ -300,19 +343,23 @@ export async function downloadModel(dir: string, opts: VoiceOptions = {}): Promi
 		);
 		let installed = false;
 		let lastError = "";
+		const timeoutMs = opts.timeoutMs;
 		for (const url of urls) {
 			try {
 				if (/\.onnx(\?|$)/i.test(url)) {
 					const modelOut = join(tmp, "model.int8.onnx");
-					await fetchToFile(url, modelOut, (n) => { downloadState.receivedBytes = n; });
+					await fetchToFile(url, modelOut, (n) => { downloadState.receivedBytes = n; }, timeoutMs);
+					await assertSha256(modelOut, opts.modelSha256, "model.int8.onnx");
 					const tokensOut = join(tmp, "tokens.txt");
-					await fetchToFile(MIRROR_TOKENS_URL, tokensOut, () => {});
+					await fetchToFile(MIRROR_TOKENS_URL, tokensOut, () => {}, timeoutMs);
+					await assertSha256(tokensOut, opts.tokensSha256, "tokens.txt");
 					renameSync(modelOut, modelFiles(dir).model);
 					renameSync(tokensOut, modelFiles(dir).tokens);
 					installed = true;
 				} else {
 					const archive = join(tmp, basename(new URL(url).pathname) || MODEL_ARCHIVE_NAME);
-					await fetchToFile(url, archive, (n) => { downloadState.receivedBytes = n; });
+					await fetchToFile(url, archive, (n) => { downloadState.receivedBytes = n; }, timeoutMs);
+					await assertSha256(archive, opts.sha256, "模型归档");
 					downloadState.phase = "extract";
 					const extractDir = join(tmp, "extract");
 					mkdirSync(extractDir, { recursive: true });
@@ -345,7 +392,9 @@ export async function downloadModel(dir: string, opts: VoiceOptions = {}): Promi
 	}
 }
 
-/** Fire-and-forget download used on first contact (never blocks a turn). */
+/** Fire-and-forget download (never blocks a turn). Callers start it when a
+ *  voice message actually needs the model, or from the explicit download
+ *  route — never from plugin load, so activation stays cheap. */
 export function startModelDownload(dir: string, opts: VoiceOptions = {}): void {
 	void downloadModel(dir, opts);
 }
