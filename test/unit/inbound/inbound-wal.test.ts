@@ -147,7 +147,12 @@ test("GH #9: delivered still wins over failed (late rescue marks it delivered)",
 });
 
 
-test("persisted file uses 0600 mode", () => {
+test(
+  "persisted file uses 0600 mode",
+  // Windows has no POSIX permission bits — chmod is a no-op there, so the
+  // assertion can only hold on POSIX (CI runs ubuntu).
+  { skip: process.platform === "win32" ? "POSIX file modes are not a thing on Windows" : false },
+  () => {
   const dir = tmpdir();
   const wal = createInboundWal({ dir });
   wal.accept(base("perm1"));

@@ -1,5 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+// Platform-aware expectations: these cases use POSIX-looking inputs, but on
+// Windows `path.resolve` turns "/data/proj" into "C:\\data\\proj". Asserting the
+// literal POSIX string made the suite fail on Windows for no real reason.
+import { join, resolve } from "node:path";
 import {
 	resolveWorkspaceTarget,
 	resolveInWorkspacePath,
@@ -8,14 +12,16 @@ import {
 // ---- resolveWorkspaceTarget (/workspace 命令) ------------------------------
 // GH #7: `startsWith("/")` 判绝对路径 —— Windows 盘符路径全部被误判为相对路径。
 
-test("paths: posix absolute arg stays absolute", () => {
+test("paths: absolute arg stays absolute", () => {
 	const t = resolveWorkspaceTarget("/data/proj", "/cur/ws");
-	assert.equal(t, "/data/proj");
+	assert.equal(t, resolve("/data/proj"));
+	assert.ok(!t.includes("cur"), "must not be joined under the current workspace");
 });
 
 test("paths: relative arg joins the current workspace", () => {
 	const t = resolveWorkspaceTarget("sub/dir", "/cur/ws");
-	assert.equal(t, "/cur/ws/sub/dir");
+	assert.ok(t.endsWith(join("sub", "dir")), `relative arg must join, got ${t}`);
+	assert.ok(t.includes("cur"), `keeps the workspace root, got ${t}`);
 });
 
 test("paths: ~ expands to homedir", () => {
@@ -48,13 +54,13 @@ test("paths: UNC path is absolute", () => {
 
 test("paths: absolute input inside root resolves and passes containment", () => {
 	const { abs, ok } = resolveInWorkspacePath("/ws/a/b.txt", "/ws/a");
-	assert.equal(abs, "/ws/a/b.txt");
+	assert.equal(abs, resolve("/ws/a/b.txt"));
 	assert.equal(ok, true);
 });
 
 test("paths: relative input resolves against the root", () => {
 	const { abs, ok } = resolveInWorkspacePath("b.txt", "/ws/a");
-	assert.equal(abs, "/ws/a/b.txt");
+	assert.equal(abs, resolve("/ws/a", "b.txt"));
 	assert.equal(ok, true);
 });
 
