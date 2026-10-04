@@ -1,2 +1,7 @@
+# pnpm 11 asks which dependencies are allowed to run install scripts.
+# protobufjs (transitive dep of @larksuiteoapi/node-sdk) only prints an install
+# hint in its postinstall — nothing is built — so we explicitly opt out.
+# Leaving the placeholder pnpm writes here ("set this to true or false") makes a
+# clean install fail with ERR_PNPM_IGNORED_BUILDS, which is exactly what broke CI.
 allowBuilds:
-  protobufjs: set this to true or false
+  protobufjs: false
