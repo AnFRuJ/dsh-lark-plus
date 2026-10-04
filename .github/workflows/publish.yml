@@ -7,6 +7,9 @@ on:
 
 permissions:
   contents: read
+  # Trusted publishing (OIDC): the runner exchanges this for a short-lived
+  # publish credential, so no long-lived NPM_TOKEN secret is needed.
+  id-token: write
 
 jobs:
   npm:
@@ -31,6 +34,8 @@ jobs:
 
       - run: pnpm run build
 
-      - run: pnpm publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Publish through npm (the reference OIDC implementation): with
+      # id-token: write and no NODE_AUTH_TOKEN, npm exchanges the GitHub OIDC
+      # token for a one-shot publish credential. pnpm keeps owning install,
+      # check, test and build.
+      - run: npm publish --access public
