@@ -6,6 +6,20 @@
 > offline voice-message transcription. Entries below `0.1.0` describe the
 > upstream history that this fork inherits.
 
+## 0.1.2 — 2026-10-04
+
+### 修复
+- **回复会彻底停发（严重）**：`outbox` 的 drain 循环只由 `start()` 启动一次，循环里任何一次意外抛错都会让它
+  永久死掉 —— 之后新回复照样入队落盘，但**再也不会被发送**，而 WS 收消息、HTTP 状态路由都还正常，
+  所以表面现象是「DSH 收到并反应了，但结果传不回飞书」。实测就卡在这一步：一条回复
+  `status: pending / attempts: 0`，此后 `outbox/` 再无写入，而入站 WAL 还在更新。
+  修复：
+  - **看门狗**（默认 5s）：发现「有活但 pump 没在跑」就重启 pump；发现 `pending`/`failed`（到期）
+    的 envelope 掉出了自己的 lane（内存版崩溃恢复）就重新入队。
+  - **循环自愈**：pump 每轮的异常被捕获、记 `onWarn`、500ms 后继续，不再结束整个循环。
+  - **单次发送超时**（默认 30s）：飞书 HTTP 卡死时不再让整条 lane 永久卡住，而是按可重试失败退避重试。
+- 以上事件都通过新的 `onWarn` 接到插件 logger，下次同类问题会直接出现在日志里。
+
 ## 0.1.1 — 2026-10-04
 
 ### 修复

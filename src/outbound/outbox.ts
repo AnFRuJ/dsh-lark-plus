@@ -37,6 +37,13 @@ export interface OutboxSender {
   /** Fired whenever the pending/failed counts change (delivery done/failed,
    *  enqueue, prune, rebuild). Lets the host refresh live status counters. */
   onStatsChange?: (stats: { pending: number; failed: number }) => void;
+  /** Report internal self-healing events (pump restarts, watchdog re-queues). */
+  onWarn?: (message: string) => void;
+  /** Abort one delivery after this long. Default 30s: a hung Feishu HTTP call
+   *  must never hold a lane (and therefore the whole outbox) forever. */
+  deliverTimeoutMs?: number;
+  /** How often the watchdog checks that work is actually draining. Default 5s. */
+  watchdogIntervalMs?: number;
 }
 
 export interface Outbox {
@@ -78,6 +85,19 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+/** Reject after ms even if the inner promise never settles (no abort needed:
+ *  the lane simply moves on and the retry sweep owns the envelope again). */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`delivery timed out after ${ms}ms`)), ms);
+    timer.unref?.();
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
+
 export function createOutbox(deps: OutboxDeps): Outbox {
   const now = deps.now ?? Date.now;
   const dir = deps.dir;
@@ -98,6 +118,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
   const laneQueues = new Map<string, Promise<void>>();
   /** Wake signal for the idle pump (set while it waits). */
   let idleWake: (() => void) | undefined;
+let watchdogTimer: ReturnType<typeof setInterval> | undefined;
 
   const emitStats = (): void => {
     try {
@@ -278,7 +299,22 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     env.updatedAt = now();
     // Sender sees a fully-resolved envelope (payload always present here).
     const resolved: OutboundEnvelope = { ...env, payload } as OutboundEnvelope;
-    const result = await deps.sender.deliver(resolved, payload);
+    // A hung request used to leave the envelope 'sending' forever and wedge the
+    // lane with it; a synchronous throw used to escape the whole deliver path.
+    // Both are now ordinary retryable failures.
+    let result: DeliveryResult;
+    try {
+      result = await withTimeout(
+        deps.sender.deliver(resolved, payload),
+        deps.deliverTimeoutMs ?? 30_000,
+      );
+    } catch (err) {
+      result = {
+        ok: false,
+        retryable: true,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
     if (result.ok) {
       env.status = "done";
       env.updatedAt = now();
@@ -344,6 +380,25 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     draining = true;
     try {
       while (!stopped) {
+        try {
+          await pumpOnce();
+        } catch (err) {
+          // The pump must never die: an unexpected throw used to end the only
+          // drain loop in the process, after which replies silently stopped
+          // reaching Feishu while everything else kept working.
+          deps.onWarn?.(
+            "outbox pump error (recovering): " + (err instanceof Error ? err.message : String(err)),
+          );
+          await sleep(500);
+        }
+      }
+    } finally {
+      draining = false;
+    }
+  }
+
+  /** One pump iteration: retry sweep + drain every non-empty lane. */
+  async function pumpOnce(): Promise<void> {
         retrySweep();
         let worked = false;
         for (const laneKey of lanes.keys()) {
@@ -372,10 +427,6 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         } else {
           await sleep(25);
         }
-      }
-    } finally {
-      draining = false;
-    }
   }
 
   // Named (hoisted) prune so start() can self-schedule it regardless of order.
@@ -410,12 +461,52 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       doPrune();
       pruneTimer = setInterval(() => doPrune(), cadence);
       if (pruneTimer.unref) pruneTimer.unref();
-      void pump();
+      void pump().catch((err) => deps.onWarn?.("outbox pump failed to start: " + String(err)));
+      // Watchdog. The drain loop is not allowed to stay dead, and an envelope
+      // that fell out of its lane is re-queued — without this, one unexpected
+      // failure silently stopped every reply forever while inbound kept working.
+      watchdogTimer = setInterval(() => {
+        try {
+          let requeued = 0;
+          for (const env of envelopes.values()) {
+            const due =
+              env.status === "pending" ||
+              (env.status === "failed" && env.nextRetryAt <= now());
+            if (!due) continue;
+            const lane = lanes.get(env.laneKey) ?? [];
+            if (!lane.includes(env.id)) {
+              lane.push(env.id);
+              lanes.set(env.laneKey, lane);
+              requeued += 1;
+            }
+          }
+          if (requeued > 0) {
+            deps.onWarn?.("outbox watchdog re-queued " + requeued + " envelope(s)");
+            idleWake?.();
+          }
+          let queued = false;
+          for (const ids of lanes.values()) {
+            if (ids.length > 0) {
+              queued = true;
+              break;
+            }
+          }
+          if (!draining && queued) {
+            deps.onWarn?.("outbox watchdog restarted the drain pump");
+            void pump().catch(() => undefined);
+          }
+        } catch (err) {
+          deps.onWarn?.("outbox watchdog failed: " + (err instanceof Error ? err.message : String(err)));
+        }
+      }, deps.watchdogIntervalMs ?? 5_000);
+      watchdogTimer.unref?.();
     },
     async stop() {
       stopped = true;
       if (pruneTimer) clearInterval(pruneTimer);
       pruneTimer = undefined;
+      if (watchdogTimer) clearInterval(watchdogTimer);
+      watchdogTimer = undefined;
       await Promise.allSettled([...activeDeliveries]);
     },
     pendingCount() {

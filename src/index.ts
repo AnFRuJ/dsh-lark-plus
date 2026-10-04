@@ -742,7 +742,8 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 		cfg: getCfg().outbox,
 		// Live outbox counters → status, so /status (and the Web panel) reflect
 		// pending/failed in real time instead of only on startup / timers.
-		onStatsChange: (stats) => {
+		onWarn: (message) => logger.warn("[outbox] " + message),
+	onStatsChange: (stats) => {
 			try {
 				status.refreshCounters({ outboxPending: stats.pending, outboxFailed: stats.failed });
 			} catch {

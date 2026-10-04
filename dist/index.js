@@ -1424,6 +1424,21 @@ function sleep$2(ms) {
 		setTimeout(resolve, ms).unref?.();
 	});
 }
+/** Reject after ms even if the inner promise never settles (no abort needed:
+*  the lane simply moves on and the retry sweep owns the envelope again). */
+function withTimeout(promise, ms) {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => reject(/* @__PURE__ */ new Error(`delivery timed out after ${ms}ms`)), ms);
+		timer.unref?.();
+		promise.then((value) => {
+			clearTimeout(timer);
+			resolve(value);
+		}, (err) => {
+			clearTimeout(timer);
+			reject(err);
+		});
+	});
+}
 function createOutbox(deps) {
 	const now = deps.now ?? Date.now;
 	const dir = deps.dir;
@@ -1442,6 +1457,7 @@ function createOutbox(deps) {
 	const laneQueues = /* @__PURE__ */ new Map();
 	/** Wake signal for the idle pump (set while it waits). */
 	let idleWake;
+	let watchdogTimer;
 	const emitStats = () => {
 		try {
 			let pending = 0;
@@ -1569,7 +1585,16 @@ function createOutbox(deps) {
 			...env,
 			payload
 		};
-		const result = await deps.sender.deliver(resolved, payload);
+		let result;
+		try {
+			result = await withTimeout(deps.sender.deliver(resolved, payload), deps.deliverTimeoutMs ?? 3e4);
+		} catch (err) {
+			result = {
+				ok: false,
+				retryable: true,
+				error: err instanceof Error ? err.message : String(err)
+			};
+		}
 		if (result.ok) {
 			env.status = "done";
 			env.updatedAt = now();
@@ -1619,33 +1644,40 @@ function createOutbox(deps) {
 		if (draining) return;
 		draining = true;
 		try {
-			while (!stopped) {
-				retrySweep();
-				let worked = false;
-				for (const laneKey of lanes.keys()) {
-					const ids = lanes.get(laneKey);
-					if (ids && ids.length > 0) {
-						worked = true;
-						const next = (laneQueues.get(laneKey) ?? Promise.resolve()).then(() => drainLane(laneKey));
-						laneQueues.set(laneKey, next.catch(() => void 0));
-						activeDeliveries.add(next);
-						next.finally(() => activeDeliveries.delete(next));
-					}
-				}
-				if (!worked) {
-					await new Promise((resolve) => {
-						idleWake = resolve;
-						setTimeout(() => {
-							idleWake = void 0;
-							resolve();
-						}, 200).unref?.();
-					});
-					idleWake = void 0;
-				} else await sleep$2(25);
+			while (!stopped) try {
+				await pumpOnce();
+			} catch (err) {
+				deps.onWarn?.("outbox pump error (recovering): " + (err instanceof Error ? err.message : String(err)));
+				await sleep$2(500);
 			}
 		} finally {
 			draining = false;
 		}
+	}
+	/** One pump iteration: retry sweep + drain every non-empty lane. */
+	async function pumpOnce() {
+		retrySweep();
+		let worked = false;
+		for (const laneKey of lanes.keys()) {
+			const ids = lanes.get(laneKey);
+			if (ids && ids.length > 0) {
+				worked = true;
+				const next = (laneQueues.get(laneKey) ?? Promise.resolve()).then(() => drainLane(laneKey));
+				laneQueues.set(laneKey, next.catch(() => void 0));
+				activeDeliveries.add(next);
+				next.finally(() => activeDeliveries.delete(next));
+			}
+		}
+		if (!worked) {
+			await new Promise((resolve) => {
+				idleWake = resolve;
+				setTimeout(() => {
+					idleWake = void 0;
+					resolve();
+				}, 200).unref?.();
+			});
+			idleWake = void 0;
+		} else await sleep$2(25);
 	}
 	function doPrune() {
 		const cutoff = now() - deps.cfg.retainDays * 864e5;
@@ -1668,12 +1700,44 @@ function createOutbox(deps) {
 			doPrune();
 			pruneTimer = setInterval(() => doPrune(), cadence);
 			if (pruneTimer.unref) pruneTimer.unref();
-			pump();
+			pump().catch((err) => deps.onWarn?.("outbox pump failed to start: " + String(err)));
+			watchdogTimer = setInterval(() => {
+				try {
+					let requeued = 0;
+					for (const env of envelopes.values()) {
+						if (!(env.status === "pending" || env.status === "failed" && env.nextRetryAt <= now())) continue;
+						const lane = lanes.get(env.laneKey) ?? [];
+						if (!lane.includes(env.id)) {
+							lane.push(env.id);
+							lanes.set(env.laneKey, lane);
+							requeued += 1;
+						}
+					}
+					if (requeued > 0) {
+						deps.onWarn?.("outbox watchdog re-queued " + requeued + " envelope(s)");
+						idleWake?.();
+					}
+					let queued = false;
+					for (const ids of lanes.values()) if (ids.length > 0) {
+						queued = true;
+						break;
+					}
+					if (!draining && queued) {
+						deps.onWarn?.("outbox watchdog restarted the drain pump");
+						pump().catch(() => void 0);
+					}
+				} catch (err) {
+					deps.onWarn?.("outbox watchdog failed: " + (err instanceof Error ? err.message : String(err)));
+				}
+			}, deps.watchdogIntervalMs ?? 5e3);
+			watchdogTimer.unref?.();
 		},
 		async stop() {
 			stopped = true;
 			if (pruneTimer) clearInterval(pruneTimer);
 			pruneTimer = void 0;
+			if (watchdogTimer) clearInterval(watchdogTimer);
+			watchdogTimer = void 0;
 			await Promise.allSettled([...activeDeliveries]);
 		},
 		pendingCount() {
@@ -5768,6 +5832,7 @@ function apply(ctx, rawConfig) {
 			}
 		} },
 		cfg: getCfg().outbox,
+		onWarn: (message) => logger.warn("[outbox] " + message),
 		onStatsChange: (stats) => {
 			try {
 				status.refreshCounters({

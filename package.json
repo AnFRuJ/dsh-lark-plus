@@ -1,6 +1,6 @@
 {
   "name": "dsh-lark-plus",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "DeepSeek Harness × Feishu/Lark bridge: chat, cards, approvals, task board, goals and schedules in Feishu — plus fully local (offline) voice transcription with a play bar in the Web GUI.",
   "type": "module",
   "license": "MIT",
